@@ -42,6 +42,11 @@ pub struct App {
     recorder: Option<dada_media::macos::writer::VideoWriter>,
     /// RTMP stream: hardveres encoder + publikáló.
     encoder: Option<dada_media::macos::encoder::VideoEncoder>,
+    /// Hang a streamhez: AAC encoder + mono gyűjtőpuffer.
+    aac: Option<dada_media::macos::aac_objc::AacEncoder>,
+    audio_pcm: Vec<f32>,
+    audio_frames_written: u64,
+    sent_audio_config: bool,
     publisher: Option<dada_stream::RtmpPublisher>,
     enc_cache: Option<dada_media::macos::metal::MetalTextureCache>,
     enc_start: Instant,
@@ -105,6 +110,10 @@ impl App {
             deck_configs,
             recorder: None,
             encoder: None,
+            aac: None,
+            audio_pcm: Vec::new(),
+            audio_frames_written: 0,
+            sent_audio_config: false,
             publisher: None,
             enc_cache: None,
             enc_start: now,
@@ -307,6 +316,47 @@ impl App {
         // Audio feldolgozás (a modulációhoz, a vizuálhoz és a streamhez).
         if let Some((engine, _)) = self.audio.as_mut() {
             self.audio_snapshot = engine.process();
+        }
+
+        // Hang a streamhez: mono minták -> AAC -> RTMP (100 ms-os blokkok).
+        if self.aac.is_some() && self.publisher.is_some() && !self.audio_snapshot.mono.is_empty()
+        {
+            self.audio_pcm.extend_from_slice(&self.audio_snapshot.mono);
+            let mut packets: Vec<Vec<u8>> = Vec::new();
+            while self.audio_pcm.len() >= 4800 {
+                let chunk: Vec<f32> = self.audio_pcm.drain(..4800).collect();
+                if let Some(aac) = self.aac.as_mut() {
+                    match aac.encode(&chunk) {
+                        Ok(p) => packets.extend(p),
+                        Err(e) => log::error!("AAC hiba: {e:#}"),
+                    }
+                }
+            }
+            if !packets.is_empty() {
+                let config = self
+                    .aac
+                    .as_ref()
+                    .map(|a| a.audio_specific_config().to_vec())
+                    .unwrap_or_default();
+                if let Some(p) = self.publisher.as_ref() {
+                    if !self.sent_audio_config && !config.is_empty() {
+                        p.send_audio(dada_stream::AudioFrame {
+                            data: dada_stream::flv::aac_sequence_header(&config),
+                            pts_ms: 0,
+                        });
+                        self.sent_audio_config = true;
+                        log::info!("RTMP: AAC sequence header elküldve ({:02X?})", config);
+                    }
+                    for packet in &packets {
+                        let pts = (self.audio_frames_written as f64 / 48000.0 * 1000.0) as u64;
+                        self.audio_frames_written += 1024;
+                        p.send_audio(dada_stream::AudioFrame {
+                            data: dada_stream::flv::aac_frame(packet),
+                            pts_ms: pts,
+                        });
+                    }
+                }
+            }
         }
 
 
@@ -1294,10 +1344,26 @@ impl ApplicationHandler for App {
                 engine.sample_rate(),
                 if vis.is_some() { "igen" } else { "nem" }
             );
+            // Ha streamelünk, a hangot AAC-be kódoljuk (48 kHz sztereó).
+            let engine_rate = engine.sample_rate() as f64;
+            let stream_audio = self.publisher.is_some();
             self.audio = Some((engine, vis));
-            // Megjegyzés: a stream-hang (AAC) a következő körben kerül be; a
-            // C AudioConverter ugyanis lezárja a streamet, ha a callback 0-t ad,
-            // ezért az ObjC AVAudioConverter blokk-API-ja kell (NoDataNow).
+            if stream_audio {
+                match dada_media::macos::aac_objc::AacEncoder::new(
+                    engine_rate,
+                    48000.0,
+                    2,
+                    128_000,
+                ) {
+                    Ok(enc) => {
+                        log::info!(
+                            "hang a streamben: AAC-LC 48 kHz sztereó (bemenet {engine_rate:.0} Hz), 128 kbps"
+                        );
+                        self.aac = Some(enc);
+                    }
+                    Err(e) => log::error!("az AAC encoder nem hozható létre: {e:#}"),
+                }
+            }
         }
         if let Some(path) = self.args.shader.clone() {
             match dada_fx::IsfShader::load(std::path::Path::new(&path)) {

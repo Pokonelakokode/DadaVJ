@@ -45,7 +45,7 @@ cargo test
 | ISF | generátorok **és effektek** (képi bemenet a lentebbi rétegek) |
 | Web UI | clip-rács előnézettel, autopilot/opacity/blend, mod-szerkesztő, MJPEG előnézet |
 | Felvétel | natív H.264 zero-copy, valós idejű MP4 |
-| Stream | RTMP (YouTube-kompatibilis), háttérszálon, frame-eldobással |
+| Stream | RTMP (YouTube-kompatibilis), **kép és hang (AAC-LC)**, háttérszálon, frame-eldobással |
 
 ## Használat
 
@@ -117,7 +117,7 @@ Mért eredmények (M4 Pro) — részletek a docs/-ban:
 videó-dekód (1080p)         733 fps (zero-copy textúra-csere 10.2 us/frame)
 audio FFT (2048)            8.5 us/frame (~1256x valós idő)
 felvétel                    188 frame / 5.09 s (valós idejű MP4)
-RTMP                        185 frame -> 188 tag, 7 keyframe, 0 hiba
+RTMP (kép + hang)           222 videó-tag (8 keyframe) + 286 audió-tag, 0 hiba
 Ableton Link                128.00 BPM pontosan, fázis-hiteles
 klipváltás                  4-12 ms
 ```

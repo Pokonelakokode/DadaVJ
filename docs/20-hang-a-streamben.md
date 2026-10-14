@@ -94,6 +94,52 @@ kör ezt ülteti át. Addig az app streamje **videó-only** (a könyvtári kód,
 FLV-tagek és az RTMP hang-út készen áll, és a helyi fogadó már számolja is az
 audió-tageket).
 
+## Az ObjC út — megoldva (24. kör)
+
+A 23. körben a konstruktor ismeretlen ObjC kivételt dobott. A módszer, ami
+megoldotta: **egy ObjC hívás = egy teszt** (külön modulban, `aac_objc`):
+
+¤¤¤
+step1_in_format          OK  (48 kHz, 2 csatorna)
+step2_out_format         OK  (AAC)
+step3_converter          OK
+step4_pcm_buffer         OK
+step5_compressed_buffer  HIBA -> a hiba oka azonnal látszott
+step6_convert_one_packet OK  (1 packet, 6 bájt)
+step7_streaming_chunks   OK  (1 másodperc 100 ms-os blokkokban -> 46 packet)
+¤¤¤
+
+### A gyökér-ok
+
+Az `AVAudioCompressedBuffer` 2 argumentumos inicializálója a dokumentáció
+szerint **elhasal, ha a formátum változó bájt/packet** — az AAC pedig pont
+ilyen. A 3 argumentumos változat kell:
+
+¤¤¤
+initWithFormat:packetCapacity:maximumPacketSize:
+  a maximumPacketSize a converter maximumOutputPacketSize-éből (nálunk 1536)
+¤¤¤
+
+Ez a hiba a 23. körben azért nem derült ki, mert a hívások egymás után
+futottak egy nagy konstruktorban. A lépésenkénti tesztelés néhány perc alatt
+megtalálta.
+
+### A teljes lánc igazolva
+
+Élő stream, helyi RTMP fogadóval, 3 réteg + ISF effekt:
+
+¤¤¤
+app:    hang a streamben: AAC-LC 48 kHz sztereó (bemenet 48000 Hz), 128 kbps
+        RTMP: AAC sequence header elküldve ([11, 90])
+        RTMP: avcC sequence header elküldve
+        RTMP: 220 frame elküldve, 0 eldobva
+
+fogadó: 222 videó-tag, 8 keyframe, 286 audió-tag, 6.0 MB — 0 hiba
+¤¤¤
+
+A 286 audió-tag = 1 sequence header + 285 AAC packet (6 s * 48000/1024 ~ 281,
+plusz az encoder priming packetjei). A stream tehát **kép és hang**.
+
 ## Az ObjC átirat első kísérlete (23. kör)
 
 Az ObjC AVAudioConverter (blokk, NoDataNow) átirata **lefordult és lefutott**,
