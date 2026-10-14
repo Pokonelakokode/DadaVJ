@@ -1,0 +1,23 @@
+[package]
+name = "dada-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+log = "0.4.34"
+objc2 = "0.6.5"
+objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media"] }
+objc2-core-foundation = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-metal = "0.3.2"
+pollster = "1.0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.31"
+wgpu = "24"

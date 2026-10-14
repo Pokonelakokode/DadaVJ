@@ -4,6 +4,9 @@
 .DS_Store
 
 # média és cache (külső SSD-re kerül)
+# teszt-média (nagy fájlok, nem verziókövetjük)
+/.testmedia
+
 /media
 /cache
 /recordings

@@ -11,6 +11,7 @@ authors = ["Krisztián Gyurkó"]
 
 [workspace.dependencies]
 dada-core = { path = "crates/dada-core" }
+dada-media = { path = "crates/dada-media" }
 
 [profile.release]
 opt-level = 3
