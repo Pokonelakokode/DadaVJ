@@ -1,14 +1,16 @@
 //! Az alkalmazás életciklusa és a frame-ciklus.
 
 use crate::audio_vis::AudioVisual;
-use crate::hud::FrameStats;
+use crate::hud::{FrameStats, ProcStats};
 use crate::renderer::{LayerRef, Renderer};
 use crate::video::VideoLayer;
 use crate::web::{self, Command, WebShared};
 use crate::Args;
 use dada_audio::AudioEngine;
 use dada_fx::Effect;
+use dada_core::{Autopilot, AutopilotMode, Clip, ClipSource, Deck, DeckEvent, Mixer, Quantize};
 use dada_midi::{EnvelopeSpec, Mapping, MidiEngine, Trigger};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,6 +27,8 @@ pub struct App {
     video: Option<VideoLayer>,
     audio: Option<(AudioEngine, AudioVisual)>,
     shader: Option<Effect>,
+    mixer: Option<Mixer>,
+    deck_folder: Option<PathBuf>,
     midi: Option<MidiEngine>,
     shader_mtime: Option<SystemTime>,
     last_shader_check: Instant,
@@ -32,6 +36,7 @@ pub struct App {
     last_preview: Instant,
     last_fps: f32,
     stats: FrameStats,
+    proc_stats: ProcStats,
     started: Instant,
     last_frame: Instant,
     summary_printed: bool,
@@ -47,6 +52,8 @@ impl App {
             video: None,
             audio: None,
             shader: None,
+            mixer: None,
+            deck_folder: None,
             midi: None,
             shader_mtime: None,
             last_shader_check: Instant::now(),
@@ -54,6 +61,7 @@ impl App {
             last_preview: Instant::now(),
             last_fps: 0.0,
             stats: FrameStats::new(3600),
+            proc_stats: ProcStats::new(),
             started: now,
             last_frame: now,
             summary_printed: false,
@@ -71,6 +79,46 @@ impl App {
             Some(engine) if engine.is_locked() => engine.transport.beats_at(t as f64) as f32,
             _ => t * 2.0,
         };
+
+        // Deck/autopilot: kvantált clip-váltás (még a videó-réteg előtt).
+        if self.mixer.is_some() {
+            let device = self.renderer.as_ref().map(|r| r.device().clone());
+            let bpm = match self.midi.as_ref() {
+                Some(engine) if engine.is_locked() => engine.bpm() as f64,
+                _ => 120.0,
+            };
+            let dt_beats = (dt_ms / 1000.0) * bpm / 60.0;
+            let events = self
+                .mixer
+                .as_mut()
+                .map(|m| m.tick(beat as f64, dt_beats))
+                .unwrap_or_default();
+            for ev in events {
+                if let DeckEvent::Launch {
+                    deck, clip, at_beat, ..
+                } = ev
+                {
+                    let next = self
+                        .mixer
+                        .as_ref()
+                        .and_then(|m| m.decks.get(deck))
+                        .and_then(|d| d.clips.get(clip))
+                        .and_then(|c| match &c.source {
+                            ClipSource::File(p) => Some((p.clone(), c.name.clone())),
+                            _ => None,
+                        });
+                    if let (Some((path, name)), Some(device)) = (next, device.as_ref()) {
+                        match VideoLayer::open(device, std::path::Path::new(&path), 1.0) {
+                            Ok(video) => {
+                                log::info!("clip váltás -> {name} (beat {at_beat:.2})");
+                                self.video = Some(video);
+                            }
+                            Err(e) => log::error!("a klip nem nyitható meg: {e:#}"),
+                        }
+                    }
+                }
+            }
+        }
 
         let Some(renderer) = self.renderer.as_mut() else {
             return;
@@ -185,7 +233,8 @@ impl App {
                     self.stats.push(dt_ms as f32);
                     if let Some(report) = self.stats.take_report() {
                         self.last_fps = report.fps as f32;
-                        println!("{}", report.line());
+                        self.proc_stats.sample();
+                        println!("{}", report.line_with_proc(&self.proc_stats));
                     }
                 }
                 Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -280,6 +329,11 @@ impl App {
         let elapsed = self.started.elapsed().as_secs_f64();
         println!("\n{}", "─".repeat(64));
         println!("BENCH ÖSSZEGZÉS — {}x{} vsync={} futás={:.2}s", self.args.width, self.args.height, self.args.vsync, elapsed);
+        self.proc_stats.sample();
+        println!(
+            "erőforrás: CPU {:5.1}% · max RSS {:.0} MB",
+            self.proc_stats.cpu_percent, self.proc_stats.rss_mb
+        );
         if let Some(s) = self.stats.summary() {
             println!(
                 "frame-ek: {}  átlag: {:.2} ms ({:.1} fps)",
@@ -384,6 +438,71 @@ impl ApplicationHandler for App {
                     }
                 }
                 Err(e) => log::error!("a shader nem tölthető be: {e:#}"),
+            }
+        }
+        if let Some(folder) = self.args.deck.clone() {
+            let path = PathBuf::from(&folder);
+            let mut names: Vec<PathBuf> = std::fs::read_dir(&path)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            matches!(
+                                p.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()),
+                                Some(ref s) if matches!(s.as_str(), "mp4" | "mov" | "m4v" | "mkv")
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            if names.is_empty() {
+                log::error!("nincs videó a mappában: {folder}");
+            } else {
+                let clips: Vec<Clip> = names
+                    .iter()
+                    .map(|p| {
+                        Clip::new(
+                            p.file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("?")
+                                .to_string(),
+                            ClipSource::File(p.display().to_string()),
+                        )
+                    })
+                    .collect();
+                log::info!(
+                    "clip-bank: {} klip a(z) {} mappából (autopilot: {:.0} ütem, {:?})",
+                    clips.len(),
+                    folder,
+                    self.args.autopilot_beats,
+                    Quantize::Beat
+                );
+                let mut mixer = Mixer::new(1);
+                let mut deck = Deck::new("A", clips);
+                deck.autopilot = Autopilot {
+                    mode: AutopilotMode::Sequential,
+                    every_beats: self.args.autopilot_beats,
+                    quantize: Quantize::Beat,
+                    next_change: None,
+                };
+                deck.fade_beats = 0.0;
+                mixer.decks[0] = deck;
+                // Az első klip azonnali betöltése.
+                let first = names[0].clone();
+                match VideoLayer::open(renderer.device(), &first, 1.0) {
+                    Ok(layer) => {
+                        log::info!("első klip: {}", first.display());
+                        self.video = Some(layer);
+                        mixer.decks[0].active = Some(0);
+                        if let Some(ap) = mixer.decks[0].autopilot.next_change.as_mut() {
+                            *ap = 0.0;
+                        }
+                    }
+                    Err(e) => log::error!("a klip nem nyitható meg: {e:#}"),
+                }
+                self.mixer = Some(mixer);
+                self.deck_folder = Some(path);
             }
         }
         if self.args.serve {

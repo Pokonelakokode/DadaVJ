@@ -4,7 +4,9 @@
 //! így gyorsan és determinisztikusan tesztelhető.
 
 pub mod clock;
+pub mod deck;
 pub mod quantize;
 
 pub use clock::{ClockPll, Transport, PPQN};
-pub use quantize::{next_grid, next_grid_strict, Quantize};
+pub use deck::{Autopilot, AutopilotMode, BlendMode, Clip, ClipSource, Deck, DeckEvent, Mixer, Queued};
+pub use quantize::{grid_floor, next_grid, next_grid_strict, Quantize};

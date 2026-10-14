@@ -79,6 +79,17 @@ pub fn next_grid(beats: f64, grid: f64) -> f64 {
     (beats / grid).ceil() * grid
 }
 
+/// A legutóbbi rácsvonal, ami nem nagyobb, mint `beats`.
+///
+/// Az autopilot ezt használja: ha a váltás esedékes (esetleg egy hajszállal
+/// a rácsvonal után), akkor arra a vonalra ütemezünk, nem a következőre.
+pub fn grid_floor(beats: f64, grid: f64) -> f64 {
+    if grid <= 0.0 {
+        return beats;
+    }
+    (beats / grid).floor() * grid
+}
+
 /// A következő rácsvonal, ami szigorúan nagyobb, mint `beats`.
 ///
 /// Ezt használjuk indításkor: ha pont egy rácsvonalon állunk, a *következőre*

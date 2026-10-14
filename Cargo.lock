@@ -582,6 +582,7 @@ dependencies = [
  "dada-midi",
  "env_logger",
  "jpeg-encoder",
+ "libc",
  "log",
  "pollster",
  "serde_json",
