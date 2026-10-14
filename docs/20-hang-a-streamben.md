@@ -67,11 +67,38 @@ számolja külön a videó- és audió-tageket.
 FLV audio-teszt: a tagek bájtpontos elrendezése unit-teszttel igazolva
 ([0xAF, 0x00, ASC] és [0xAF, 0x01, data]).
 
+## A C API csapdája (és a következő lépés)
+
+Az élő bekötés közben kiderült, hogy a C AudioConverter **nem alkalmas
+folyamatos streamelésre**:
+
+1. Ha az input callback 0 packetet ad, a converter **lezárja a streamet** —
+   utána soha többé nem kér bemenetet.
+2. A converter a kért packeteken FELÜL ~2 packetet előre olvas, ezért ha
+   pontosan annyit adunk, amennyi a kért packetekhez kell, a callback
+   kifogy — és az 1. pont miatt az encoder meghal.
+
+Amit kipróbáltam: perzisztens puffer, tartalék packet, 100-250 ms-os blokkok.
+Az eredmény: 4 hívásból **14 packet** (a várt ~47 helyett) — a converter a
+bemenet egy részét belső pufferben tartja, a kimenet elmarad. Élő streamhez
+ez nem jó (a késleltetés nő).
+
+**Egyetlen nagy hívással viszont tökéletes**: 1 másodperc zaj -> 48 packet,
+3 ms (297x valós idő), 11.5 KB. Ezért a `--aac-check` mindkét utat méri és
+megmutatja a különbséget.
+
+A helyes API az **ObjC AVAudioConverter blokk-alapú** hívása
+(convertToBuffer:error:withInputFromBlock:), mert a blokk tud
+AVAudioConverterInputStatus_NoDataNow-t adni — az **nem** EOF. A következő
+kör ezt ülteti át. Addig az app streamje **videó-only** (a könyvtári kód, az
+FLV-tagek és az RTMP hang-út készen áll, és a helyi fogadó már számolja is az
+audió-tageket).
+
 ## Ami még hátra van
 
-Az app bekötése: a bemeneti mono minták megjegyzése az elemzés mellett,
-sztereóvá duplázás, AAC kódolás, és a publikálóhoz küldés időbélyeggel
-(a videó és a hang PTS-e ugyanabból az órából). Ez a következő kör.
+1. Az ObjC AVAudioConverter (blokk, NoDataNow) az AAC encoderhez.
+2. Az app bekötése: a mono minták (már benne vannak a snapshotban) ->
+   sztereó -> AAC -> publikáló, a videóval azonos órából származó PTS-sel.
 
 ## Reprodukálás
 

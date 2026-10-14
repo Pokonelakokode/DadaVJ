@@ -304,10 +304,11 @@ impl App {
             }
         }
 
-        // Audio feldolgozás (a modulációhoz és a vizuálhoz is).
+        // Audio feldolgozás (a modulációhoz, a vizuálhoz és a streamhez).
         if let Some((engine, _)) = self.audio.as_mut() {
             self.audio_snapshot = engine.process();
         }
+
 
         // Modulációs mátrix.
         self.mod_shader.clear();
@@ -1259,7 +1260,9 @@ impl ApplicationHandler for App {
             }
         }
 
-        let need_audio = self.args.audio_visual || self.matrix.uses_audio();
+        // Hang kell, ha vizuál, moduláció VAGY stream kéri.
+        let need_audio =
+            self.args.audio_visual || self.matrix.uses_audio() || self.publisher.is_some();
         if !need_audio {
             // nincs audio
         } else {
@@ -1292,6 +1295,9 @@ impl ApplicationHandler for App {
                 if vis.is_some() { "igen" } else { "nem" }
             );
             self.audio = Some((engine, vis));
+            // Megjegyzés: a stream-hang (AAC) a következő körben kerül be; a
+            // C AudioConverter ugyanis lezárja a streamet, ha a callback 0-t ad,
+            // ezért az ObjC AVAudioConverter blokk-API-ja kell (NoDataNow).
         }
         if let Some(path) = self.args.shader.clone() {
             match dada_fx::IsfShader::load(std::path::Path::new(&path)) {

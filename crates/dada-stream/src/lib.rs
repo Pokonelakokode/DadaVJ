@@ -12,4 +12,4 @@ pub use flv::{
     aac_frame, aac_sequence_header, avc_frame, avc_sequence_header, avcc_from_sps_pps, AUDIO_TAG,
     VIDEO_TAG,
 };
-pub use rtmp::{RtmpPublisher, StatsSnapshot, VideoFrame};
+pub use rtmp::{AudioFrame, RtmpPublisher, StatsSnapshot, VideoFrame};

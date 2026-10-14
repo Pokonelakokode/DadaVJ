@@ -44,12 +44,40 @@ pub async fn aac_check(_args: &Args) -> Result<()> {
     }
     println!("AAC-CHECK — {rate} Hz sztereó, {secs} s fehér zaj, 128 kbps cél");
 
-    let mut enc = AacEncoder::new(rate, 2, 128_000)?;
+    // 1. Blokkonkénti út (mint egy élő stream). FIGYELEM: a C AudioConverter
+    // lezárja a streamet, ha a callback 0 packetet ad — ezért ez az út
+    // tartós streamelésre nem alkalmas (lásd a dokumentumot); a mérés így is
+    // megmutatja a viselkedést.
+    let mut enc_block = AacEncoder::new(rate, rate, 2, 128_000)?;
+    let mut enc = &mut enc_block;
     let t0 = std::time::Instant::now();
-    let packets = enc.encode(&pcm)?;
+    let mut block_packets = 0usize;
+    let mut calls = 0usize;
+    let mut first_at = None;
+    for (i, chunk) in pcm.chunks(24000).enumerate() {
+        let p = enc.encode(chunk)?;
+        calls += 1;
+        if !p.is_empty() && first_at.is_none() {
+            first_at = Some(i);
+        }
+        block_packets += p.len();
+    }
+    println!(
+        "  blokkonként: {calls} hívás, {block_packets} packet, első packet a {first_at:?}. hívásnál"
+    );
+    println!(
+        "  callback: {} hívás, utolsó kérés {} packet, utolsó átadás {}",
+        dada_media::macos::aac::CB_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        dada_media::macos::aac::CB_WANT.load(std::sync::atomic::Ordering::Relaxed),
+        dada_media::macos::aac::CB_GIVE.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    // 2. Egyetlen nagy hívás (friss encoderrel): ez a megbízható út.
+    let mut enc_single = AacEncoder::new(rate, rate, 2, 128_000)?;
+    let t0 = std::time::Instant::now();
+    let packets = enc_single.encode(&pcm)?;
     let dt = t0.elapsed();
     let total: usize = packets.iter().map(|p| p.len()).sum();
-    let asc = enc.audio_specific_config().to_vec();
+    let asc = enc_single.audio_specific_config().to_vec();
     let avg = if packets.is_empty() {
         0
     } else {

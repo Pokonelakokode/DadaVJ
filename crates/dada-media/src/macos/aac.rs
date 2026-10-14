@@ -7,7 +7,7 @@
 //! Az AudioSpecificConfig-ot (a sequence headerhez) előbb a converter
 //! magic cookie-jából kérjük; ha az nem elérhető, szabvány szerint építjük.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use std::ffi::c_void;
 
 type OSStatus = i32;
@@ -97,6 +97,11 @@ extern "C" {
     fn AudioConverterDispose(conv: AudioConverterRef) -> OSStatus;
 }
 
+/// Diagnosztika: a callback hívásai és az utolsó kérés.
+pub static CB_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static CB_WANT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static CB_GIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// A callback bemenete.
 struct Feed {
     samples: Vec<f32>,
@@ -119,6 +124,9 @@ extern "C" fn input_proc(
     let want = unsafe { *io_number_data_packets } as usize;
     let avail = (feed.samples.len().saturating_sub(feed.pos)) / feed.channels.max(1);
     let give = want.min(avail);
+    CB_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    CB_WANT.store(want as u64, std::sync::atomic::Ordering::Relaxed);
+    CB_GIVE.store(give as u64, std::sync::atomic::Ordering::Relaxed);
     if give == 0 {
         unsafe {
             *io_number_data_packets = 0;
@@ -171,7 +179,9 @@ fn aac_asbd(sample_rate: f64, channels: u32) -> Asbd {
     Asbd {
         sample_rate,
         format_id: FORMAT_AAC,
-        format_flags: 0, // AAC-LC
+        // Az AAC-nál a formatFlags a kodek objektumtípusa:
+        // kMPEG4Object_AAC_LC = 2. (0-val a converter máshogy viselkedik.)
+        format_flags: 2,
         bytes_per_packet: 0,
         frames_per_packet: 1024,
         bytes_per_frame: 0,
@@ -182,10 +192,12 @@ fn aac_asbd(sample_rate: f64, channels: u32) -> Asbd {
 }
 
 impl AacEncoder {
-    pub fn new(sample_rate: f64, channels: u32, bitrate: u32) -> Result<Self> {
+    /// in_rate: a bemeneti PCM rátája; out_rate: az AAC rátája (a converter
+    /// átmintavételez, ha eltérnek).
+    pub fn new(in_rate: f64, out_rate: f64, channels: u32, bitrate: u32) -> Result<Self> {
         let mut conv: AudioConverterRef = std::ptr::null_mut();
-        let input = pcm_asbd(sample_rate, channels);
-        let output = aac_asbd(sample_rate, channels);
+        let input = pcm_asbd(in_rate, channels);
+        let output = aac_asbd(out_rate, channels);
         let status = unsafe { AudioConverterNew(&input, &output, &mut conv) };
         if status != 0 || conv.is_null() {
             bail!("AudioConverterNew hiba: {status} ({})", fourcc_str(status as u32));
@@ -201,7 +213,7 @@ impl AacEncoder {
         let mut enc = Self {
             conv,
             channels: channels as usize,
-            sample_rate,
+            sample_rate: out_rate,
             feed: Feed {
                 samples: Vec::new(),
                 pos: 0,
@@ -211,9 +223,9 @@ impl AacEncoder {
             frames_encoded: 0,
             packets_encoded: 0,
         };
-        enc.asc = enc.read_magic_cookie().unwrap_or_else(|| {
-            audio_specific_config(sample_rate, channels)
-        });
+        enc.asc = enc
+            .read_magic_cookie()
+            .unwrap_or_else(|| audio_specific_config(out_rate, channels));
         Ok(enc)
     }
 
@@ -251,17 +263,31 @@ impl AacEncoder {
         if interleaved.is_empty() || self.channels == 0 {
             return Ok(Vec::new());
         }
-        self.feed.samples.clear();
+        // FONTOS: a C AudioConverter 0 packetet kapva LEFÁRJA a streamet, ezért
+        // a callback soha nem fogyhat ki a híváson belül. Ezért perzisztens
+        // puffert tartunk, és mindig egy teljes packet tartalékot hagyunk.
+        if self.feed.pos > 0 {
+            self.feed.samples.drain(..self.feed.pos);
+            self.feed.pos = 0;
+        }
         self.feed.samples.extend_from_slice(interleaved);
-        self.feed.pos = 0;
+        let avail_frames = self.feed.samples.len() / self.channels;
         let frames = (interleaved.len() / self.channels) as u64;
         self.frames_encoded += frames;
+        // Az AAC encoder a kért packeteken FELÜL is előre olvas (~2 packet),
+        // ezért annyit hagyunk tartalékban, hogy a callback soha ne adjon 0-t.
+        const LOOKAHEAD: u32 = 6;
+        let max_packets = (avail_frames / 1024) as u32;
+        if max_packets < LOOKAHEAD + 2 {
+            return Ok(Vec::new());
+        }
+        let request = (max_packets - LOOKAHEAD).min(16);
 
         let mut out: Vec<Vec<u8>> = Vec::new();
         let mut scratch = vec![0u8; 64 * 1024];
         let mut descs = vec![PacketDescription::default(); 64];
         for _ in 0..64 {
-            let mut packets: u32 = 64;
+            let mut packets: u32 = request;
             let mut list = AudioBufferList {
                 number_buffers: 1,
                 buffers: [AudioBuffer {
@@ -299,7 +325,9 @@ impl AacEncoder {
             }
         }
         if out.is_empty() {
-            return Err(anyhow!("az encoder nem adott packetet ({} minta)", frames));
+            // Nem hiba: az AAC encoder belső puffere még gyűjt (priming).
+            // A minták nem vesznek el, a következő hívásnál kijönnek.
+            log::debug!("AAC: {} minta be, packet még nincs (belső puffer)", frames);
         }
         Ok(out)
     }

@@ -193,14 +193,25 @@ impl AudioEngine {
         let Ok(mut analyzer) = self.shared.analyzer.lock() else {
             return AnalyzerSnapshot::default();
         };
-        if synthetic {
+        // A nyers mono minták megőrzése (a hang-streamhez) — az elemzés
+        // ugyanezeket a mintákat kapja.
+        let mono = if synthetic {
             if !synth_buf.is_empty() {
                 analyzer.push(&synth_buf);
             }
-        } else if let Some(samples) = taken {
-            analyzer.push(&samples);
-        }
-        snapshot(&analyzer)
+            synth_buf
+        } else {
+            match taken {
+                Some(samples) => {
+                    analyzer.push(&samples);
+                    samples
+                }
+                None => Vec::new(),
+            }
+        };
+        let mut snap = snapshot(&analyzer);
+        snap.mono = mono;
+        snap
     }
 
     /// A szintetikus jel a bemenetre generálódik (nem a hangszóróra): a hang
@@ -246,6 +257,8 @@ pub struct AnalyzerSnapshot {
     /// Hányadik sorba került (0..SPECTROGRAM_COLS).
     pub spectrogram_row_index: usize,
     pub fft_runs: u64,
+    /// A most feldolgozott nyers mono minták (a hang-stream kódolásához).
+    pub mono: Vec<f32>,
 }
 
 impl AnalyzerSnapshot {
@@ -261,6 +274,7 @@ fn snapshot(analyzer: &Analyzer) -> AnalyzerSnapshot {
         spectrogram_row: analyzer.spectrogram.last_row.clone(),
         spectrogram_row_index: analyzer.spectrogram.write_row,
         fft_runs: analyzer.fft_runs,
+        mono: Vec::new(),
     }
 }
 
