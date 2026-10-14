@@ -25,6 +25,109 @@ use anyhow::{bail, Result};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Automatikus modulációs validáció: forrás -> mátrix -> cél (headless).
+///
+/// Végigmegy mindhárom fontos forrás-típuson:
+///   * MIDI note -> envelope -> deck-opacity (majd lecseng),
+///   * audio-sáv -> shader-paraméter,
+///   * LFO -> master-opacity.
+pub async fn mod_check(_args: &Args) -> Result<()> {
+    use dada_core::modulation::{
+        Curve, EnvelopeSpec, ModInputs, ModMatrix, ModOutputs, ModRoute, ModSource, ModTarget,
+    };
+
+    let mut m = ModMatrix::new();
+    let kick_spec = EnvelopeSpec {
+        attack_ms: 0.0,
+        hold_ms: 0.0,
+        decay_ms: 200.0,
+        curve: Curve::Linear,
+        retrigger: true,
+    };
+    m.add(
+        ModRoute::new(ModSource::Note { note: 36 }, ModTarget::DeckOpacity(1))
+            .with_spec(kick_spec),
+    );
+    m.add(ModRoute::new(
+        ModSource::AudioBand(1),
+        ModTarget::ShaderParam(0),
+    ));
+    m.add(ModRoute::new(
+        ModSource::Lfo {
+            period_beats: 8.0,
+        },
+        ModTarget::MasterOpacity,
+    ));
+    m.add(ModRoute::new(
+        ModSource::AudioOnset,
+        ModTarget::DeckNextClip(0),
+    ));
+
+    println!("MOD-CHECK — {} útvonal, audio-forrás: {}", m.routes.len(), m.uses_audio());
+
+    let frames = 240u32;
+    let mut rows: Vec<(u32, f32, f32, f32, u64)> = Vec::new();
+    let mut triggers = 0u32;
+    let mut peak_op = 0.0f32;
+    let mut min_after_peak = 1.0f32;
+    let mut seen_peak = false;
+
+    for i in 0..frames {
+        let beat = i as f64 / 30.0; // 30 frame / negyed = 120 BPM 60 fps-en
+        let kick = i % 30 == 0;
+        let mut inp = ModInputs {
+            dt_ms: 1000.0 / 60.0,
+            beat,
+            bpm: 120.0,
+            ..Default::default()
+        };
+        if kick {
+            inp.notes = vec![(36, 110)];
+        }
+        // Basszus-sáv: lassan pulzál.
+        inp.bands[1] = (0.35 + 0.35 * (beat * 0.5).sin() as f32).clamp(0.0, 1.0);
+        inp.onset = i % 45 == 0;
+
+        let out = m.tick(&inp);
+        let op = ModOutputs::value(&out, ModTarget::DeckOpacity(1));
+        let sh = ModOutputs::value(&out, ModTarget::ShaderParam(0));
+        let ma = ModOutputs::value(&out, ModTarget::MasterOpacity);
+        if out.has_trigger(ModTarget::DeckNextClip(0)) {
+            triggers += 1;
+        }
+        peak_op = peak_op.max(op);
+        if op > 0.6 {
+            seen_peak = true;
+        }
+        if seen_peak && op < min_after_peak {
+            min_after_peak = op;
+        }
+        if i % 20 == 0 {
+            rows.push((i, op, sh, ma, m.routes[0].hits));
+        }
+    }
+
+    println!("  frame   kick-op   shader   master   kick-ek");
+    for (i, op, sh, ma, hits) in &rows {
+        println!("  {i:>5}   {op:.2}      {sh:.2}     {ma:.2}     {hits}");
+    }
+    println!(
+        "  csúcs deck-opacity: {peak_op:.2} · lecsengés után: {min_after_peak:.2} · trigger-ek: {triggers}"
+    );
+
+    if peak_op < 0.6 {
+        bail!("a kick nem hajtotta fel a deck-opacity-t: {peak_op:.2}");
+    }
+    if min_after_peak > 0.15 {
+        bail!("az envelope nem cseng le: {min_after_peak:.2}");
+    }
+    if triggers < 3 {
+        bail!("az audio-onset nem triggerelt: {triggers}");
+    }
+    println!("  OK: MIDI note, audio-sáv és LFO is eljut a céljáig.");
+    Ok(())
+}
+
 /// Automatikus MIDI-validáció: clock -> BPM, note -> envelope -> shader -> pixel.
 ///
 /// Végigmegy a teljes láncon szintetikus MIDI byte-okkal (nincs szükség hardverre):

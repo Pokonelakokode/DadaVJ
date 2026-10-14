@@ -9,8 +9,11 @@ use crate::Args;
 use dada_audio::AudioEngine;
 use dada_fx::Effect;
 use dada_core::{
-    Autopilot, AutopilotMode, BlendMode, Clip, ClipSource, Deck, DeckEvent, Mixer, Quantize,
+    Autopilot, AutopilotMode, BlendMode, Clip, ClipSource, Deck, DeckEvent, Mixer, ModInputs,
+    ModMatrix, ModOutputs, ModRoute, ModSource, ModTarget, Quantize,
 };
+use dada_audio::AnalyzerSnapshot;
+use dada_midi::MidiMessage;
 use dada_midi::{EnvelopeSpec, Mapping, MidiEngine, Trigger};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -28,7 +31,14 @@ pub struct App {
     renderer: Option<Renderer>,
     /// Deck-enként egy videó-réteg (a mixer.decks-cel párhuzamosan).
     videos: Vec<Option<VideoLayer>>,
-    audio: Option<(AudioEngine, AudioVisual)>,
+    audio: Option<(AudioEngine, Option<AudioVisual>)>,
+    audio_snapshot: AnalyzerSnapshot,
+    matrix: ModMatrix,
+    mod_deck_opacity: Vec<f32>,
+    mod_shader: Vec<(usize, f32)>,
+    mod_audio: f32,
+    mod_master: f32,
+    mod_master_active: bool,
     shader: Option<Effect>,
     mixer: Option<Mixer>,
     deck_folder: Option<PathBuf>,
@@ -58,6 +68,13 @@ impl App {
             renderer: None,
             videos: Vec::new(),
             audio: None,
+            audio_snapshot: AnalyzerSnapshot::default(),
+            matrix: ModMatrix::new(),
+            mod_deck_opacity: Vec::new(),
+            mod_shader: Vec::new(),
+            mod_audio: 0.0,
+            mod_master: 0.0,
+            mod_master_active: false,
             shader: None,
             mixer: None,
             deck_folder: None,
@@ -148,10 +165,88 @@ impl App {
                 }
             }
         }
-        // MIDI: hardveres byte-ok átvétele, clock, envelope-ok léptetése.
+        // MIDI: hardveres byte-ok átvétele + események kigyűjtése.
+        let mut midi_notes: Vec<(u8, u8)> = Vec::new();
+        let mut midi_offs: Vec<u8> = Vec::new();
+        let mut midi_ccs: Vec<(u8, u8)> = Vec::new();
         if let Some(midi) = self.midi.as_mut() {
             midi.tick(t as f64, dt_ms as f32 / 1000.0);
-            let _ = midi.take_events();
+            for ev in midi.take_events() {
+                match ev.message {
+                    MidiMessage::NoteOn { note, velocity, .. } => midi_notes.push((note, velocity)),
+                    MidiMessage::NoteOff { note, .. } => midi_offs.push(note),
+                    MidiMessage::ControlChange { cc, value, .. } => midi_ccs.push((cc, value)),
+                    _ => {}
+                }
+            }
+        }
+
+        // Audio feldolgozás (a modulációhoz és a vizuálhoz is).
+        if let Some((engine, _)) = self.audio.as_mut() {
+            self.audio_snapshot = engine.process();
+        }
+
+        // Modulációs mátrix.
+        self.mod_shader.clear();
+        self.mod_audio = 0.0;
+        self.mod_master = 0.0;
+        self.mod_master_active = false;
+        for d in self.mod_deck_opacity.iter_mut() {
+            *d = 0.0;
+        }
+        if !self.matrix.routes.is_empty() {
+            let st = &self.audio_snapshot.state;
+            let bpm = match self.midi.as_ref() {
+                Some(e) if e.is_locked() => e.bpm() as f64,
+                _ => 120.0,
+            };
+            let inputs = ModInputs {
+                bands: [
+                    st.bands[0], st.bands[1], st.bands[2], st.bands[3], st.bands[4], st.bands[5],
+                ],
+                rms: st.rms,
+                onset: st.onset,
+                notes: midi_notes,
+                note_offs: midi_offs,
+                ccs: midi_ccs,
+                dt_ms: dt_ms as f32,
+                beat: beat as f64,
+                bpm,
+            };
+            let outputs = self.matrix.tick(&inputs);
+            for (target, value) in &outputs.continuous {
+                match target {
+                    ModTarget::DeckOpacity(i) => {
+                        while self.mod_deck_opacity.len() <= *i {
+                            self.mod_deck_opacity.push(0.0);
+                        }
+                        if let Some(d) = self.mod_deck_opacity.get_mut(*i) {
+                            *d = d.max(*value);
+                        }
+                    }
+                    ModTarget::ShaderParam(i) => self.mod_shader.push((*i, *value)),
+                    ModTarget::AudioOpacity => self.mod_audio = self.mod_audio.max(*value),
+                    ModTarget::MasterOpacity => {
+                        self.mod_master_active = true;
+                        self.mod_master = self.mod_master.max(*value);
+                    }
+                    _ => {}
+                }
+            }
+            for target in &outputs.triggers {
+                if let ModTarget::DeckNextClip(deck) = target {
+                    if let Some(mixer) = self.mixer.as_mut() {
+                        if let Some(d) = mixer.decks.get(*deck) {
+                            if !d.clips.is_empty() {
+                                let next = d.active.map(|a| (a + 1) % d.clips.len()).unwrap_or(0);
+                                let q = d.autopilot.quantize;
+                                mixer.queue(*deck, next, beat as f64, q);
+                                log::debug!("mod trigger: deck {deck} -> klip {next}");
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Web-parancsok alkalmazása (még a réteg kiválasztása előtt).
@@ -202,6 +297,13 @@ impl App {
                 .and_then(|m| m.decks.get(*deck_index))
                 .map(|d| (d.blend, d.opacity))
                 .unwrap_or((BlendMode::Normal, video_opacity));
+            let mod_delta = self
+                .mod_deck_opacity
+                .get(*deck_index)
+                .copied()
+                .unwrap_or(0.0);
+            let master = master_scale(self.mod_master_active, self.mod_master);
+            let opacity = ((opacity + mod_delta).min(1.0)) * master;
             if let Some(video) = self.videos.get(*deck_index).and_then(|s| s.as_ref()) {
                 video.set_opacity(renderer.queue(), opacity);
                 let bind_group = renderer.make_video_bind_group(view, video.params_buffer());
@@ -255,7 +357,17 @@ impl App {
                     }
                 }
             }
-            effect.opacity = shader_opacity;
+            // Modulációs mátrix -> shader paraméterek.
+            for (idx, value) in &self.mod_shader {
+                if let Some(p) = effect.shader.params.get(*idx) {
+                    if *idx < effect.values.len() {
+                        let val = p.default[0] + value * (p.max - p.default[0]);
+                        effect.values[*idx] = [val, p.default[1], p.default[2], p.default[3]];
+                    }
+                }
+            }
+            effect.opacity =
+                shader_opacity * master_scale(self.mod_master_active, self.mod_master);
             effect.update(renderer.queue(), [w as f32, h as f32], t, dt_ms as f32 / 1000.0);
             layers.push(LayerRef {
                 pipeline: effect.pipeline(BlendMode::Add).clone(),
@@ -264,10 +376,10 @@ impl App {
         }
 
         // 3. Audio-vizuál réteg — Screen.
-        if let Some((engine, vis)) = self.audio.as_mut() {
-            let snapshot = engine.process();
-            vis.opacity = audio_opacity;
-            vis.update(renderer.queue(), &snapshot, t, w, h);
+        if let Some((_, Some(vis))) = self.audio.as_mut() {
+            vis.opacity = ((audio_opacity + self.mod_audio).min(1.0))
+                * master_scale(self.mod_master_active, self.mod_master);
+            vis.update(renderer.queue(), &self.audio_snapshot, t, w, h);
             layers.push(LayerRef {
                 pipeline: vis.pipeline(BlendMode::Screen).clone(),
                 bind_group: vis.bind_group().clone(),
@@ -409,6 +521,57 @@ impl App {
     }
 }
 
+/// A master-opacity moduláció skálája (1.0, ha nincs ilyen útvonal).
+fn master_scale(active: bool, value: f32) -> f32 {
+    if active {
+        (1.0 - value).clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// Egy modulációs útvonal értelmezése: FORRAS->CEL[:MENNY[:DECAY]]
+fn parse_mod_route(spec: &str) -> Option<ModRoute> {
+    let (src, dst_part) = spec.split_once("->")?;
+    let mut parts = dst_part.split(':');
+    let dst = parts.next()?;
+    let amount: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    let decay: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(150.0);
+
+    let source = match src {
+        s if s.starts_with("note:") => ModSource::Note {
+            note: s[5..].parse().ok()?,
+        },
+        s if s.starts_with("cc:") => ModSource::Cc {
+            cc: s[3..].parse().ok()?,
+        },
+        "audio.sub" => ModSource::AudioBand(0),
+        "audio.bass" => ModSource::AudioBand(1),
+        "audio.low_mid" => ModSource::AudioBand(2),
+        "audio.mid" => ModSource::AudioBand(3),
+        "audio.high_mid" => ModSource::AudioBand(4),
+        "audio.high" => ModSource::AudioBand(5),
+        "audio.rms" => ModSource::AudioRms,
+        "audio.onset" => ModSource::AudioOnset,
+        s if s.starts_with("lfo:") => ModSource::Lfo {
+            period_beats: s[4..].parse().ok()?,
+        },
+        "clock.phase" => ModSource::ClockPhase,
+        _ => return None,
+    };
+    let target = match dst {
+        s if s.starts_with("deck.opacity.") => ModTarget::DeckOpacity(s[13..].parse().ok()?),
+        s if s.starts_with("deck.next.") => ModTarget::DeckNextClip(s[10..].parse().ok()?),
+        s if s.starts_with("shader.param.") => ModTarget::ShaderParam(s[13..].parse().ok()?),
+        "audio.opacity" => ModTarget::AudioOpacity,
+        "master.opacity" => ModTarget::MasterOpacity,
+        _ => return None,
+    };
+    let mut route = ModRoute::new(source, target).with_amount(amount);
+    route.spec.decay_ms = decay;
+    Some(route)
+}
+
 /// Videófájlok felkutatása egy mappában.
 fn scan_videos(path: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(path)
@@ -445,7 +608,27 @@ impl ApplicationHandler for App {
         log::info!("ablak létrehozva: {:?}", window.inner_size());
         let renderer = pollster::block_on(Renderer::new_surface(window.clone(), self.args.vsync))
             .expect("nem sikerült a renderert inicializálni");
-        if self.args.audio_visual {
+        // Modulációs mátrix felépítése.
+        for spec in &self.args.mods {
+            match parse_mod_route(spec) {
+                Some(route) => {
+                    log::info!(
+                        "mod: {:?} -> {:?} (mennyiség {:.2}, decay {:.0} ms)",
+                        route.source,
+                        route.target,
+                        route.amount,
+                        route.spec.decay_ms
+                    );
+                    self.matrix.add(route);
+                }
+                None => log::error!("értelmezhetetlen mod útvonal: {spec}"),
+            }
+        }
+
+        let need_audio = self.args.audio_visual || self.matrix.uses_audio();
+        if !need_audio {
+            // nincs audio
+        } else {
             let dev = self.args.audio_device.as_deref();
             let engine = match dev {
                 Some(dev) => {
@@ -462,12 +645,17 @@ impl ApplicationHandler for App {
                 }
                 None => AudioEngine::synthetic(48000.0),
             };
-            let (w, h) = renderer.size();
-            let vis = AudioVisual::new(renderer.device(), renderer.format(), w, h);
+            let vis = if self.args.audio_visual {
+                let (w, h) = renderer.size();
+                Some(AudioVisual::new(renderer.device(), renderer.format(), w, h))
+            } else {
+                None
+            };
             log::info!(
-                "audio-vizuál bekapcsolva: {:?} @ {} Hz",
+                "audio bekapcsolva: {:?} @ {} Hz (vizuál: {})",
                 engine.kind(),
-                engine.sample_rate()
+                engine.sample_rate(),
+                if vis.is_some() { "igen" } else { "nem" }
             );
             self.audio = Some((engine, vis));
         }
