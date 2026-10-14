@@ -94,6 +94,24 @@ kör ezt ülteti át. Addig az app streamje **videó-only** (a könyvtári kód,
 FLV-tagek és az RTMP hang-út készen áll, és a helyi fogadó már számolja is az
 audió-tageket).
 
+## Az ObjC átirat első kísérlete (23. kör)
+
+Az ObjC AVAudioConverter (blokk, NoDataNow) átirata **lefordult és lefutott**,
+de a konstruktorban ObjC kivétel keletkezett:
+
+¤¤¤
+fatal runtime error: Rust cannot catch foreign exceptions, aborting
+¤¤¤
+
+A kivétel a `new()` négy ObjC hívásának valamelyikéből jön
+(initWithCommonFormat, initWithSettings, initFromFormat:toFormat,
+AVAudioCompressedBuffer). A pontos hely nem derült ki, mert a
+diagnosztikai kiírások beillesztése közben a kód elromlott.
+
+**Tanulság:** ezt lépésenként kell portolni, minden ObjC híváshoz egy-egy
+kis `#[test]`-tel, így a kivétel pontos helye azonnal látszik. A C verzió
+addig is a helyén marad (egyetlen nagy hívással tökéletesen működik).
+
 ## Ami még hátra van
 
 1. Az ObjC AVAudioConverter (blokk, NoDataNow) az AAC encoderhez.

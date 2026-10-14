@@ -65,12 +65,6 @@ pub async fn aac_check(_args: &Args) -> Result<()> {
     println!(
         "  blokkonként: {calls} hívás, {block_packets} packet, első packet a {first_at:?}. hívásnál"
     );
-    println!(
-        "  callback: {} hívás, utolsó kérés {} packet, utolsó átadás {}",
-        dada_media::macos::aac::CB_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-        dada_media::macos::aac::CB_WANT.load(std::sync::atomic::Ordering::Relaxed),
-        dada_media::macos::aac::CB_GIVE.load(std::sync::atomic::Ordering::Relaxed),
-    );
     // 2. Egyetlen nagy hívás (friss encoderrel): ez a megbízható út.
     let mut enc_single = AacEncoder::new(rate, rate, 2, 128_000)?;
     let t0 = std::time::Instant::now();

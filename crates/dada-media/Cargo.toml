@@ -8,10 +8,12 @@ authors.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+block2 = "0.6.2"
 jpeg-encoder = "0.6.1"
 log = "0.4.34"
 objc2 = "0.6.5"
 objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media"] }
+objc2-avf-audio = { version = "0.3.2", features = ["block2"] }
 objc2-core-foundation = "0.3.2"
 objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"
