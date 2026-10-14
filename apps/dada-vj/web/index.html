@@ -38,7 +38,7 @@
 </style>
 </head>
 <body>
-<header><div class="dot"></div><h1>Dada VJ</h1><span id="status" class="dim">kapcsolodas...</span></header>
+<header><div class="dot"></div><h1>Dada VJ</h1><span id="status" class="dim">kapcsolodas...</span><button onclick="saveProject()" style="margin-left:auto">Mentés</button></header>
 <main>
   <div>
     <div class="panel"><img id="preview" src="/preview.mjpg" alt="elonezet"></div>
@@ -91,6 +91,7 @@ function modAdd(){
   if (s && t) post({cmd:"mod_add", source:s, target:t, amount:a});
 }
 function modRemove(i){ post({cmd:"mod_remove", index:i}); }
+function saveProject(){ post({cmd:"save_project"}); }
 
 var builtParams = "";
 function buildParams(params){

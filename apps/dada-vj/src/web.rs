@@ -38,6 +38,8 @@ pub enum Command {
     },
     /// Modulációs útvonal törlése.
     ModRemove { index: usize },
+    /// A jelenlegi felállás mentése projektfájlba.
+    SaveProject { path: Option<String> },
 }
 
 pub struct WebShared {
@@ -225,6 +227,11 @@ fn handle(mut request: tiny_http::Request, shared: &Arc<WebShared>) -> Result<()
                     Some("mod_remove") => {
                         let index = v.get("index").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
                         shared.push_command(Command::ModRemove { index });
+                        ok = true;
+                    }
+                    Some("save_project") => {
+                        let path = v.get("path").and_then(|p| p.as_str()).map(|s| s.to_string());
+                        shared.push_command(Command::SaveProject { path });
                         ok = true;
                     }
                     _ => {}

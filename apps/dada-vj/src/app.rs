@@ -34,6 +34,9 @@ pub struct App {
     audio: Option<(AudioEngine, Option<AudioVisual>)>,
     audio_snapshot: AnalyzerSnapshot,
     matrix: ModMatrix,
+    /// A betöltött projekt és a deck-konfigurációk (mentéshez és felépítéshez).
+    project: crate::project::Project,
+    deck_configs: Vec<crate::project::DeckConfig>,
     mod_deck_opacity: Vec<f32>,
     mod_shader: Vec<(usize, f32)>,
     mod_audio: f32,
@@ -61,9 +64,28 @@ pub struct App {
 
 impl App {
     pub fn new(args: Args) -> Self {
+        let mut args = args;
         let now = Instant::now();
+        let project = load_project_into_args(&mut args);
+        let deck_configs: Vec<crate::project::DeckConfig> = if !args.decks.is_empty() {
+            args.decks
+                .iter()
+                .map(|s| crate::project::Project::parse_deck_spec(s, args.autopilot_beats).0)
+                .collect()
+        } else {
+            project.decks.clone()
+        };
+        if args.decks.is_empty() && !project.decks.is_empty() {
+            args.decks = project
+                .decks
+                .iter()
+                .map(crate::project::Project::deck_to_spec)
+                .collect();
+        }
         Self {
             args,
+            project,
+            deck_configs,
             window: None,
             renderer: None,
             videos: Vec::new(),
@@ -346,6 +368,23 @@ impl App {
                         if index < self.matrix.routes.len() {
                             self.matrix.routes.remove(index);
                             log::info!("UI mod törölve: #{index}");
+                        }
+                    }
+                    Command::SaveProject { path } => {
+                        let target = path
+                            .or_else(|| self.args.project.clone())
+                            .unwrap_or_else(|| "dada-project.toml".to_string());
+                        let snapshot = project_snapshot(
+                            &self.args,
+                            &self.project,
+                            self.mixer.as_ref(),
+                            &self.matrix,
+                            &self.deck_configs,
+                            self.deck_folder.as_deref(),
+                        );
+                        match snapshot.save(Path::new(&target)) {
+                            Ok(()) => log::info!("projekt mentve: {target}"),
+                            Err(e) => log::error!("mentési hiba: {e:#}"),
                         }
                     }
                 }
@@ -733,6 +772,145 @@ fn parse_mod_route(spec: &str) -> Option<ModRoute> {
     Some(route)
 }
 
+/// A jelenlegi felállás projektként (mentéshez).
+fn project_snapshot(args: &Args, project: &crate::project::Project, mixer: Option<&Mixer>, matrix: &ModMatrix, deck_configs: &[crate::project::DeckConfig], deck_folder: Option<&Path>) -> crate::project::Project {
+    let mut p = crate::project::Project::from_cli(args, Some(project));
+    if let Some(mixer) = mixer {
+        p.decks = mixer
+            .decks
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let folder = deck_configs
+                    .get(i)
+                    .map(|c| c.folder.clone())
+                    .or_else(|| deck_folder.map(|f| f.display().to_string()))
+                    .unwrap_or_default();
+                crate::project::DeckConfig {
+                    folder,
+                    start_clip: d.active,
+                    autopilot: Some(ap_name(d.autopilot.mode).to_string()),
+                    every_beats: Some(d.autopilot.every_beats),
+                    quantize: Some("beat".into()),
+                    blend: Some(blend_name(d.blend).to_string()),
+                    opacity: Some(d.opacity),
+                    fade_beats: Some(d.fade_beats),
+                }
+            })
+            .collect();
+    }
+    p.mods = matrix
+        .routes
+        .iter()
+        .map(|r| crate::project::ModConfig {
+            route: format!(
+                "{}->{}:{}:{}",
+                mod_source_name(r.source),
+                mod_target_name(r.target),
+                r.amount,
+                r.spec.decay_ms
+            ),
+        })
+        .collect();
+    p
+}
+
+/// A projekt betöltése és a CLI-argumentumok kiegészítése vele.
+fn load_project_into_args(args: &mut Args) -> crate::project::Project {
+    let mut project = crate::project::Project::default();
+    if let Some(path) = args.project.clone() {
+        match crate::project::Project::load(Path::new(&path)) {
+            Ok(p) => {
+                log::info!(
+                    "projekt betöltve: {path} ({} deck, {} mod)",
+                    p.decks.len(),
+                    p.mods.len()
+                );
+                project = p;
+            }
+            Err(e) => log::error!("a projekt nem tölthető be: {e:#}"),
+        }
+    }
+    if !args.size_set {
+      if let Some(sz) = &project.output.size {
+        if let Some((w, h)) = sz.split_once('x') {
+            if let (Ok(w), Ok(h)) = (w.trim().parse::<u32>(), h.trim().parse::<u32>()) {
+                args.width = w;
+                args.height = h;
+            }
+        }
+      }
+    }
+    if !args.vsync_set {
+        if let Some(v) = project.output.vsync {
+            args.vsync = v;
+        }
+    }
+    if !args.serve {
+        if project.output.serve == Some(true) {
+            args.serve = true;
+        }
+    }
+    if !args.port_set {
+        if let Some(p) = project.output.port {
+            args.port = p;
+        }
+    }
+    if args.shader.is_none() {
+        args.shader = project.shader.clone();
+    }
+    if !args.audio_visual {
+        if project.audio.enabled == Some(true) {
+            args.audio_visual = true;
+        }
+    }
+    if args.audio_device.is_none() {
+        args.audio_device = project.audio.device.clone();
+    }
+    if args.mods.is_empty() {
+        args.mods = project.mods.iter().map(|m| m.route.clone()).collect();
+    }
+    project
+}
+
+fn blend_from_name(name: Option<&str>) -> BlendMode {
+    match name {
+        Some("add") => BlendMode::Add,
+        Some("screen") => BlendMode::Screen,
+        Some("multiply") => BlendMode::Multiply,
+        _ => BlendMode::Normal,
+    }
+}
+
+fn autopilot_from_name(name: Option<&str>, beats: f64) -> AutopilotMode {
+    match name {
+        Some("sequential") => AutopilotMode::Sequential,
+        Some("shuffle") => AutopilotMode::Shuffle,
+        Some("weighted") => AutopilotMode::Weighted,
+        Some("off") => AutopilotMode::Off,
+        _ => {
+            if beats > 0.0 {
+                AutopilotMode::Sequential
+            } else {
+                AutopilotMode::Off
+            }
+        }
+    }
+}
+
+fn quantize_from_name(name: Option<&str>) -> Quantize {
+    match name {
+        Some("bar") | Some("1bar") => Quantize::Bar,
+        Some("off") => Quantize::Off,
+        Some("1/16") => Quantize::Sixteenth,
+        Some("1/8") => Quantize::Eighth,
+        Some("4") => Quantize::FourBeats,
+        Some("8") => Quantize::EightBeats,
+        Some("16") => Quantize::SixteenBeats,
+        _ => Quantize::Beat,
+    }
+}
+
 /// Videófájlok felkutatása egy mappában.
 fn scan_videos(path: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(path)
@@ -934,6 +1112,23 @@ impl ApplicationHandler for App {
             }
             self.mixer = Some(mixer);
             self.deck_folder = specs.first().map(|s| s.0.clone());
+        }
+
+        // A projektből származó extra deck-beállítások (opacity, autopilot mód, fade).
+        if let Some(mixer) = self.mixer.as_mut() {
+            for (i, cfg) in self.deck_configs.clone().iter().enumerate() {
+                if let Some(d) = mixer.decks.get_mut(i) {
+                    if let Some(op) = cfg.opacity {
+                        d.opacity = op.clamp(0.0, 1.0);
+                    }
+                    if let Some(mode) = cfg.autopilot.as_deref() {
+                        d.autopilot.mode = autopilot_from_name(Some(mode), d.autopilot.every_beats);
+                    }
+                    if let Some(f) = cfg.fade_beats {
+                        d.fade_beats = f;
+                    }
+                }
+            }
         }
         if self.args.serve {
             let shared = WebShared::new();

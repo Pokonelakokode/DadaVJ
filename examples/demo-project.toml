@@ -1,0 +1,27 @@
+version = 1
+shader = "shaders/plasma.isf"
+
+[output]
+size = "1280x720"
+vsync = true
+serve = false
+port = 7777
+
+[audio]
+enabled = false
+
+[[decks]]
+folder = ".testmedia/base"
+autopilot = "sequential"
+every_beats = 16.0
+quantize = "beat"
+
+[[decks]]
+folder = ".testmedia/overlay"
+autopilot = "sequential"
+every_beats = 8.0
+quantize = "beat"
+blend = "screen"
+
+[[mods]]
+route = "note:36->deck.opacity.1:1.0:180"

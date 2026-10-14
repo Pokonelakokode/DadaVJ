@@ -6,6 +6,7 @@
 mod app;
 mod audio_vis;
 mod bench;
+mod project;
 mod hud;
 mod renderer;
 mod video;
@@ -53,6 +54,14 @@ pub struct Args {
     pub autopilot_beats: f64,
     /// Modulációs útvonalak: FORRAS->CEL[:mennyiseg[:decay_ms]]
     pub mods: Vec<String>,
+    /// Projektfájl betöltése (TOML).
+    pub project: Option<String>,
+    /// Az aktuális felállás mentése projektfájlba, majd kilépés.
+    pub save: Option<String>,
+    /// Explicit jelzők: a projekt csak azt tölti ki, amit a CLI nem adott meg.
+    pub size_set: bool,
+    pub vsync_set: bool,
+    pub port_set: bool,
     /// Automatikus modulációs validáció (headless).
     pub mod_check: bool,
     /// Beépített web-szerver (vezérlő UI + MJPEG előnézet).
@@ -84,6 +93,11 @@ impl Default for Args {
             decks: Vec::new(),
             autopilot_beats: 16.0,
             mods: Vec::new(),
+            project: None,
+            save: None,
+            size_set: false,
+            vsync_set: false,
+            port_set: false,
             mod_check: false,
             serve: false,
             port: 7777,
@@ -104,6 +118,7 @@ impl Args {
                         .ok_or_else(|| anyhow::anyhow!("--size formátuma: 1920x1080"))?;
                     args.width = w.parse()?;
                     args.height = h.parse()?;
+                    args.size_set = true;
                 }
                 "--bench" => {
                     let v = it.next().unwrap_or_else(|| "10".into());
@@ -145,17 +160,23 @@ impl Args {
                     }
                 }
                 "--mod-check" => args.mod_check = true,
+                "--project" => args.project = it.next(),
+                "--save" => args.save = it.next(),
                 "--serve" => args.serve = true,
                 "--port" => {
                     let v = it.next().unwrap_or_else(|| "7777".into());
                     args.port = v.parse()?;
                     args.serve = true;
+                    args.port_set = true;
                 }
-                "--no-vsync" => args.vsync = false,
+                "--no-vsync" => {
+                    args.vsync = false;
+                    args.vsync_set = true;
+                }
                 "--fullscreen" => args.fullscreen = true,
                 "-h" | "--help" => {
                     println!(
-                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --midi              MIDI-bemenetek megnyitása (több forrás egyszerre)\n  --midi-visual       MIDI note -> envelope -> shader paraméter\n  --midi-check        automatikus MIDI-validáció (headless)\n  --deck MAPPA[:UTEM[:BLEND]]  videó-mappa mint clip-bank (többször ismételhető)\n  --autopilot N       autopilot váltás N ütem után (alap: 16)\n  --mod FORRAS->CEL[:MENNY[:DECAY]]  modulációs útvonal (többször ismételhető)\n      források: note:N, cc:N, audio.sub|bass|low_mid|mid|high_mid|high|rms|onset, lfo:UTEM, clock.phase\n      célok:    deck.opacity.N, deck.next.N, shader.param.N, audio.opacity, master.opacity\n  --mod-check         automatikus modulációs validáció (headless)\n  --serve             webes vezérlő UI + MJPEG előnézet (127.0.0.1:7777)\n  --port N            a web-szerver portja\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
+                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --midi              MIDI-bemenetek megnyitása (több forrás egyszerre)\n  --midi-visual       MIDI note -> envelope -> shader paraméter\n  --midi-check        automatikus MIDI-validáció (headless)\n  --deck MAPPA[:UTEM[:BLEND]]  videó-mappa mint clip-bank (többször ismételhető)\n  --autopilot N       autopilot váltás N ütem után (alap: 16)\n  --mod FORRAS->CEL[:MENNY[:DECAY]]  modulációs útvonal (többször ismételhető)\n      források: note:N, cc:N, audio.sub|bass|low_mid|mid|high_mid|high|rms|onset, lfo:UTEM, clock.phase\n      célok:    deck.opacity.N, deck.next.N, shader.param.N, audio.opacity, master.opacity\n  --mod-check         automatikus modulációs validáció (headless)\n  --project FAJL.toml projekt betöltése\n  --save FAJL.toml    a felállás mentése és kilépés\n  --serve             webes vezérlő UI + MJPEG előnézet (127.0.0.1:7777)\n  --port N            a web-szerver portja\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
                         env!("CARGO_PKG_VERSION")
                     );
                     std::process::exit(0);
@@ -170,6 +191,19 @@ impl Args {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse()?;
+
+    // Projekt mentése és kilépés.
+    if let Some(path) = args.save.clone() {
+        let loaded = match &args.project {
+            Some(p) => project::Project::load(std::path::Path::new(p)).ok(),
+            None => None,
+        };
+        let p = project::Project::from_cli(&args, loaded.as_ref());
+        p.save(std::path::Path::new(&path))?;
+        println!("projekt mentve: {path}");
+        println!("{}", p.to_toml()?);
+        return Ok(());
+    }
 
     // Headless moduláció-validáció.
     if args.mod_check {
