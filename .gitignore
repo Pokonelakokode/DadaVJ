@@ -1,0 +1,11 @@
+/target
+/.toolchain
+**/*.rs.bk
+.DS_Store
+
+# média és cache (külső SSD-re kerül)
+/media
+/cache
+/recordings
+node_modules/
+dist/
