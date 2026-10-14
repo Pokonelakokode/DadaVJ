@@ -12,3 +12,6 @@
 /recordings
 node_modules/
 dist/
+
+# felvételek
+*.mp4

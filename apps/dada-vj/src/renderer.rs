@@ -272,6 +272,24 @@ impl Renderer {
         self.format
     }
 
+    /// A kompozit renderelése egy megadott textúra-nézetbe (pl. felvétel).
+    pub fn render_to(
+        &mut self,
+        view: &wgpu::TextureView,
+        size: (u32, u32),
+        time: f32,
+        beat: f32,
+        layers: &[LayerRef],
+    ) {
+        let mut encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("record-encoder"),
+                });
+        self.draw(&mut encoder, view, size, time, beat, layers);
+        self.queue.submit(Some(encoder.finish()));
+    }
+
     pub fn device(&self) -> &wgpu::Device {
         &self.device
     }

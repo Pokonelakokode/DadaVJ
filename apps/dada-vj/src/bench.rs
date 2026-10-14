@@ -25,6 +25,144 @@ use anyhow::{bail, Result};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Egy videófájl vizsgálata: méret, frame-szám, hossz (headless).
+pub async fn probe(path: &str) -> Result<()> {
+    use dada_media::macos::reader::VideoReader;
+    let mut reader = VideoReader::open(std::path::Path::new(path))?;
+    let mut count = 0u64;
+    let mut first = 0.0f64;
+    let mut last = 0.0f64;
+    while let Some(frame) = reader.next_frame()? {
+        if count == 0 {
+            first = frame.pts_secs;
+        }
+        last = frame.pts_secs;
+        count += 1;
+    }
+    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "PROBE {path} — {}x{}, {count} frame, {:.2} s (PTS {:.3}..{:.3}), {:.1} MB",
+        reader.width(),
+        reader.height(),
+        last - first,
+        first,
+        last,
+        bytes as f64 / 1_048_576.0
+    );
+    if count == 0 {
+        bail!("a fájl nem tartalmaz dekódolható frame-et");
+    }
+    Ok(())
+}
+
+/// Automatikus felvétel-validáció: írás AVAssetWriterrel, majd visszaolvasás
+/// a saját dekóderünkkel. Ez a teljes encode -> fájl -> decode kört lefedi.
+pub async fn record_check(args: &Args) -> Result<()> {
+    use dada_media::macos::reader::VideoReader;
+    use dada_media::macos::writer::VideoWriter;
+    use std::time::Instant;
+
+    let path = std::path::PathBuf::from(
+        args.record
+            .clone()
+            .unwrap_or_else(|| ".testmedia/record-check.mp4".to_string()),
+    );
+    let (w, h) = (640u32, 360u32);
+    let fps = 60.0f64;
+    let frames = 90u64;
+    println!(
+        "RECORD-CHECK — {w}x{h} @ {fps} fps, {frames} frame -> {}",
+        path.display()
+    );
+
+    let mut writer = VideoWriter::new(&path, w, h, fps, 4_000_000)?;
+    let t0 = Instant::now();
+    for i in 0..frames {
+        let pb = writer.pixel_buffer()?;
+        let x0 = (i as u32 * 4) % w;
+        VideoWriter::fill(&pb, |row, y| {
+            for (x, px) in row.chunks_mut(4).enumerate() {
+                let xu = x as u32;
+                let on = xu >= x0 && xu < x0 + 40 && (y as u32) >= 100 && (y as u32) < 160;
+                // Háttér: B=200, G=50, R=10 (a csatorna-sorrend ellenőrzéséhez).
+                let (b, g, r) = if on {
+                    (255u8, 255u8, 255u8)
+                } else {
+                    (200u8, 50u8, 10u8)
+                };
+                px[0] = b;
+                px[1] = g;
+                px[2] = r;
+                px[3] = 255;
+            }
+        })?;
+        writer.append(&pb)?;
+    }
+    writer.finish()?;
+    let elapsed = t0.elapsed();
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "  encode: {:.0} ms ({:.0} fps) · fájl: {:.1} KB ({:.1} Mbit/s)",
+        elapsed.as_secs_f64() * 1000.0,
+        frames as f64 / elapsed.as_secs_f64(),
+        bytes as f64 / 1024.0,
+        bytes as f64 * 8.0 / elapsed.as_secs_f64() / 1_000_000.0
+    );
+
+    // Visszaolvasás a saját dekóderünkkel.
+    let mut reader = VideoReader::open(&path)?;
+    let mut count = 0u64;
+    let mut background = [0u8; 4];
+    let mut bright_frames = 0u32;
+    let mut first_bright: Option<u64> = None;
+    while let Some(frame) = reader.next_frame()? {
+        if count == 0 {
+            background = VideoWriter::read_pixel_bgra(&frame.pixel_buffer, 600, 20);
+        }
+        // A mozgó sáv az y=130 sorban halad át x=300-on.
+        let px = VideoWriter::read_pixel_bgra(&frame.pixel_buffer, 300, 130);
+        let sum = px[0] as u32 + px[1] as u32 + px[2] as u32;
+        if sum > 600 {
+            bright_frames += 1;
+            first_bright.get_or_insert(count);
+        }
+        count += 1;
+    }
+    println!(
+        "  visszaolvasva: {count} frame, {}x{}",
+        reader.width(),
+        reader.height()
+    );
+    println!(
+        "  háttér-pixel (600,20): B={} G={} R={} A={}  (elvárt: B~200 G~50 R~10)",
+        background[0], background[1], background[2], background[3]
+    );
+    println!(
+        "  a mozgó sáv {bright_frames} frame-en haladt át (első: {:?})",
+        first_bright
+    );
+
+    if count != frames {
+        bail!("a visszaolvasott frame-szám {count}, várt {frames}");
+    }
+    if reader.width() != w || reader.height() != h {
+        bail!("a méret nem egyezik: {}x{}", reader.width(), reader.height());
+    }
+    // A csatorna-sorrend: a kék dominál, a piros alacsony.
+    if background[0] < 150 || background[2] > 90 {
+        bail!(
+            "a csatorna-sorrend hibás (B={}, R={})",
+            background[0],
+            background[2]
+        );
+    }
+    if !(5..=20).contains(&bright_frames) {
+        bail!("a mozgó sáv nem a várt módon jelenik meg: {bright_frames} frame");
+    }
+    println!("  OK: a felvétel írható és visszaolvasható, a színek és a mozgás rendben.");
+    Ok(())
+}
+
 /// Automatikus modulációs validáció: forrás -> mátrix -> cél (headless).
 ///
 /// Végigmegy mindhárom fontos forrás-típuson:

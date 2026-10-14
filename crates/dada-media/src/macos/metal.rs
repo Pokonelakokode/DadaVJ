@@ -119,6 +119,27 @@ impl MetalTextureCache {
         width: u32,
         height: u32,
     ) -> Result<WrappedFrame> {
+        self.wrap_bgra_with_usage(
+            device,
+            pixel_buffer,
+            width,
+            height,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        )
+    }
+
+    /// Mint a wrap_bgra, de a wgpu textúra használati jegyei megadhatók.
+    ///
+    /// Felvételhez RENDER_ATTACHMENT is kell, hogy a kompozit bele renderelhető
+    /// legyen (a CVPixelBuffer IOSurface-hátú, ezt a Metal támogatja).
+    pub fn wrap_bgra_with_usage(
+        &self,
+        device: &wgpu::Device,
+        pixel_buffer: &CVPixelBuffer,
+        width: u32,
+        height: u32,
+        usage: wgpu::TextureUsages,
+    ) -> Result<WrappedFrame> {
         let cv_texture = create_cv_metal_texture(
             &self.cache,
             pixel_buffer,
@@ -148,7 +169,7 @@ impl MetalTextureCache {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Bgra8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage,
             view_formats: &[],
         };
 

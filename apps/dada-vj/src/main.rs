@@ -64,6 +64,12 @@ pub struct Args {
     pub port_set: bool,
     /// Automatikus modulációs validáció (headless).
     pub mod_check: bool,
+    /// Felvétel fájlba (MP4, H.264).
+    pub record: Option<String>,
+    /// Felvétel-validáció (headless): írás, majd visszaolvasás.
+    pub record_check: bool,
+    /// Egy videófájl vizsgálata (headless): méret, frame-szám, hossz.
+    pub probe: Option<String>,
     /// Beépített web-szerver (vezérlő UI + MJPEG előnézet).
     pub serve: bool,
     /// A web-szerver portja.
@@ -99,6 +105,9 @@ impl Default for Args {
             vsync_set: false,
             port_set: false,
             mod_check: false,
+            record: None,
+            record_check: false,
+            probe: None,
             serve: false,
             port: 7777,
         }
@@ -160,6 +169,9 @@ impl Args {
                     }
                 }
                 "--mod-check" => args.mod_check = true,
+                "--record" => args.record = it.next(),
+                "--record-check" => args.record_check = true,
+                "--probe" => args.probe = it.next(),
                 "--project" => args.project = it.next(),
                 "--save" => args.save = it.next(),
                 "--serve" => args.serve = true,
@@ -203,6 +215,16 @@ fn main() -> Result<()> {
         println!("projekt mentve: {path}");
         println!("{}", p.to_toml()?);
         return Ok(());
+    }
+
+    // Egy videófájl vizsgálata.
+    if let Some(path) = args.probe.clone() {
+        return pollster::block_on(bench::probe(&path));
+    }
+
+    // Headless felvétel-validáció.
+    if args.record_check {
+        return pollster::block_on(bench::record_check(&args));
     }
 
     // Headless moduláció-validáció.

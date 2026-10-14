@@ -36,6 +36,11 @@ pub struct App {
     matrix: ModMatrix,
     /// A betöltött projekt és a deck-konfigurációk (mentéshez és felépítéshez).
     project: crate::project::Project,
+    /// Felvétel: AVAssetWriter + a pixel bufferek Metal-csomagolója.
+    recorder: Option<dada_media::macos::writer::VideoWriter>,
+    rec_cache: Option<dada_media::macos::metal::MetalTextureCache>,
+    rec_next: Instant,
+    rec_start: Instant,
     deck_configs: Vec<crate::project::DeckConfig>,
     mod_deck_opacity: Vec<f32>,
     mod_shader: Vec<(usize, f32)>,
@@ -86,6 +91,10 @@ impl App {
             args,
             project,
             deck_configs,
+            recorder: None,
+            rec_cache: None,
+            rec_next: now,
+            rec_start: now,
             window: None,
             renderer: None,
             videos: Vec::new(),
@@ -114,6 +123,17 @@ impl App {
             started: now,
             last_frame: now,
             summary_printed: false,
+        }
+    }
+
+    /// A felvétel lezárása (a fájl befejezése).
+    fn finish_recording(&mut self) {
+        if let Some(mut rec) = self.recorder.take() {
+            let frames = rec.frames;
+            match rec.finish() {
+                Ok(()) => log::info!("felvétel lezárva: {frames} frame"),
+                Err(e) => log::error!("a felvétel lezárása sikertelen: {e:#}"),
+            }
         }
     }
 
@@ -524,10 +544,56 @@ impl App {
             if let Some(secs) = self.args.bench_secs {
                 if t as f64 >= secs {
                     self.print_summary();
+                    self.finish_recording();
                     event_loop.exit();
                     return;
                 }
             }
+            // Felvétel: a kompozit a felvevő pixel bufferébe renderelve (zero-copy).
+            if self.recorder.is_some() && self.rec_cache.is_some() {
+                let now = Instant::now();
+                if now >= self.rec_next {
+                    let fps = self.recorder.as_ref().map(|r| r.fps).unwrap_or(60.0);
+                    self.rec_next = now + Duration::from_secs_f64(1.0 / fps);
+                    let buffer = self.recorder.as_ref().and_then(|r| r.pixel_buffer().ok());
+                    if let Some(buffer) = buffer {
+                        let (rw, rh) = self.recorder.as_ref().map(|r| r.size).unwrap_or((0, 0));
+                        let wrapped = {
+                            let device = renderer.device();
+                            self.rec_cache
+                                .as_ref()
+                                .map(|c| {
+                                    c.wrap_bgra_with_usage(
+                                        device,
+                                        &buffer,
+                                        rw,
+                                        rh,
+                                        wgpu::TextureUsages::TEXTURE_BINDING
+                                            | wgpu::TextureUsages::RENDER_ATTACHMENT
+                                            | wgpu::TextureUsages::COPY_SRC,
+                                    )
+                                })
+                        };
+                        match wrapped {
+                            Some(Ok(wrapped)) => {
+                                let view = wrapped.view();
+                                renderer.render_to(&view, (rw, rh), t, beat, &layers);
+                                let pts_ms = self.rec_start.elapsed().as_secs_f64() * 1000.0;
+                                if let Some(rec) = self.recorder.as_mut() {
+                                    if let Err(e) = rec.append_at_ms(&buffer, pts_ms) {
+                                        log::error!("felvétel-hiba: {e:#}");
+                                    }
+                                }
+                            }
+                            Some(Err(e)) => {
+                                log::error!("a felvétel-puffer nem csomagolható: {e:#}")
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            }
+
             window.request_redraw();
         }
 
@@ -961,6 +1027,32 @@ impl ApplicationHandler for App {
                     self.matrix.add(route);
                 }
                 None => log::error!("értelmezhetetlen mod útvonal: {spec}"),
+            }
+        }
+
+        // Felvétel indítása (natív H.264; a kompozit közvetlenül a felvevő pufferébe megy).
+        if let Some(path) = self.args.record.clone() {
+            let (rw, rh) = renderer.size();
+            let fps = 60.0f64;
+            match dada_media::macos::writer::VideoWriter::new(
+                Path::new(&path),
+                rw,
+                rh,
+                fps,
+                12_000_000,
+            ) {
+                Ok(writer) => match dada_media::macos::metal::MetalTextureCache::new(
+                    renderer.device(),
+                ) {
+                    Ok(cache) => {
+                        log::info!("felvétel: {path} ({rw}x{rh} @ {fps} fps, 12 Mbit/s)");
+                        self.rec_cache = Some(cache);
+                        self.recorder = Some(writer);
+                        self.rec_start = Instant::now();
+                    }
+                    Err(e) => log::error!("a felvétel textúra-cache nem hozható létre: {e:#}"),
+                },
+                Err(e) => log::error!("a felvétel nem indítható: {e:#}"),
             }
         }
 

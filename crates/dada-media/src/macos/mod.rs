@@ -2,3 +2,4 @@
 
 pub mod metal;
 pub mod reader;
+pub mod writer;
