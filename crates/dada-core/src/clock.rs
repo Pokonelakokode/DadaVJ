@@ -99,8 +99,9 @@ impl ClockPll {
         if !slope.is_finite() || slope <= 0.0 {
             return;
         }
-        let spb = clamp_bpm(60.0 / (slope * PPQN as f64)) * PPQN as f64;
-        let new_spt = 60.0 / spb / PPQN as f64;
+        // bpm = 60 / (másodperc/negyed);  másodperc/negyed = slope * PPQN
+        let bpm_est = clamp_bpm(60.0 / (slope * PPQN as f64));
+        let new_spt = 60.0 / bpm_est / PPQN as f64;
         // Enyhe simítás: a regresszió már simít, de egy kiugró tick ne rántson el.
         self.seconds_per_tick = self.seconds_per_tick * 0.7 + new_spt * 0.3;
 
@@ -122,7 +123,7 @@ impl ClockPll {
 
     /// Be van-e már zárva a PLL (van elég tickünk).
     pub fn is_locked(&self) -> bool {
-        self.points.len() >= 8.min(self.window)
+        self.points.len() >= 24.min(self.window)
     }
 
     /// Milyen tick-sorszámnál járnánk `t` időpontban a jelenlegi becslés szerint.

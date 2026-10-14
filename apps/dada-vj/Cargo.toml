@@ -7,4 +7,11 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+anyhow = "1.0.104"
+bytemuck = { version = "1.25.2", features = ["derive"] }
 dada-core.workspace = true
+env_logger = "0.11.11"
+log = "0.4.34"
+pollster = "1.0.1"
+wgpu = "24.0.5"
+winit = "0.30.13"

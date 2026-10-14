@@ -31,6 +31,18 @@ cargo test
 cargo run -p dada-vj -- --help
 ```
 
+## Teljesítmény-mérés
+
+A `--raw-bench` ablak és vsync nélkül méri a frame valós költségét (lásd: [docs/01-spike-a-mercek.md](docs/01-spike-a-mercek.md)):
+
+```bash
+cargo run --release -p dada-vj -- --raw-bench 600 --size 1920x1080 --layers 4
+```
+
+Első mérési eredmény (M4 Pro): 1080p-n egy teljes képernyős, alpha-blendelt shader-réteg ~**0.06 ms**,
+a 4 layeres teljes kép ~**0.28 ms** — a 16.67 ms-os büdzsé **1.7%-a**. A kompozitálás tehát nem
+szűk keresztmetszet; a büdzsét a videó-dekód és a drága shaderek töltik ki.
+
 ## Elvek
 
 1. **Zero-copy** a videó úton: VideoToolbox → IOSurface → Metal textúra, CPU-másolás nélkül.
