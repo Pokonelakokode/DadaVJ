@@ -55,6 +55,9 @@ pub struct Renderer {
     adapter_name: String,
     timers: Option<Timers>,
     timestamp_period_ns: f32,
+    video_bgl: wgpu::BindGroupLayout,
+    video_sampler: wgpu::Sampler,
+    video_pipeline: wgpu::RenderPipeline,
 }
 
 impl Renderer {
@@ -113,6 +116,7 @@ impl Renderer {
         );
 
         let pipeline = create_pipeline(&device, format);
+        let (video_bgl, video_sampler, video_pipeline) = create_video_resources(&device, format);
         let (uniform_buffer, bind_group) = create_uniforms(&device, width, height);
 
         let config = wgpu::SurfaceConfiguration {
@@ -142,6 +146,9 @@ impl Renderer {
             adapter_name,
             timers,
             timestamp_period_ns,
+            video_bgl,
+            video_sampler,
+            video_pipeline,
         })
     }
 
@@ -194,11 +201,14 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let pipeline = create_pipeline(&device, format);
+        let (video_bgl, video_sampler, video_pipeline) = create_video_resources(&device, format);
         let (uniform_buffer, bind_group) = create_uniforms(&device, width, height);
 
         Ok(Self {
@@ -216,6 +226,9 @@ impl Renderer {
             adapter_name,
             timers,
             timestamp_period_ns,
+            video_bgl,
+            video_sampler,
+            video_pipeline,
         })
     }
 
@@ -259,6 +272,7 @@ impl Renderer {
         time: f32,
         beat: f32,
         layers: u32,
+        video: Option<&wgpu::TextureView>,
     ) -> Result<(), wgpu::SurfaceError> {
         match &self.target {
             Target::Surface { surface, config } => {
@@ -278,6 +292,7 @@ impl Renderer {
                     time,
                     beat,
                     layers,
+                    video,
                 );
                 self.queue.submit(Some(encoder.finish()));
                 frame.present();
@@ -289,7 +304,7 @@ impl Renderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frame-offscreen"),
                         });
-                self.draw(&mut encoder, view, *size, time, beat, layers);
+                self.draw(&mut encoder, view, *size, time, beat, layers, video);
                 self.queue.submit(Some(encoder.finish()));
                 Ok(())
             }
@@ -316,7 +331,7 @@ impl Renderer {
         // encoder végén rögzíti, ezért egy üres blittel kikényszerítjük.
         encoder.write_timestamp(&timers.query_set, 0);
         encoder.clear_buffer(&timers.flush, 0, Some(4));
-        self.draw(&mut encoder, view, *size, time, beat, layers);
+        self.draw(&mut encoder, view, *size, time, beat, layers, None);
         // 2. minta: a render pass után.
         encoder.write_timestamp(&timers.query_set, 1);
         encoder.resolve_query_set(&timers.query_set, 0..2, &timers.resolve, 0);
@@ -349,6 +364,7 @@ impl Renderer {
         time: f32,
         beat: f32,
         layers: u32,
+        video: Option<&wgpu::TextureView>,
     ) {
         let uniforms = Uniforms {
             resolution: [size.0 as f32, size.1 as f32],
@@ -377,11 +393,86 @@ impl Renderer {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        // Egy instanced draw: a shader az instance_index-szel rétegenként más
-        // képet rajzol, így a driver nem vonhatja össze a munkát.
-        pass.draw(0..3, 0..layers);
+        if let Some(video_view) = video {
+            // Videó-réteg: a zero-copy MTLTexture-t mintavételezzük.
+            pass.set_pipeline(&self.video_pipeline);
+            let video_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("video-frame"),
+                layout: &self.video_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(video_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.video_sampler),
+                    },
+                ],
+            });
+            pass.set_bind_group(0, &video_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        } else {
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            // Egy instanced draw: a shader az instance_index-szel rétegenként más
+            // képet rajzol, így a driver nem vonhatja össze a munkát.
+            pass.draw(0..3, 0..layers);
+        }
+    }
+
+    /// Az offscreen cél közepéről olvas vissza pixeleket (automatikus validációhoz).
+    pub fn read_back_center(&self, cols: u32, rows: u32) -> Option<Vec<u8>> {
+        let Target::Offscreen { _texture, size, .. } = &self.target else {
+            return None;
+        };
+        let (width, height) = *size;
+        let cols = cols.min(width);
+        let rows = rows.min(height);
+        let bytes_per_row = ((cols * 4).div_ceil(256)) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (bytes_per_row * rows) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("readback"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: _texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: (width - cols) / 2,
+                    y: (height - rows) / 2,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(rows),
+                },
+            },
+            wgpu::Extent3d {
+                width: cols,
+                height: rows,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::Maintain::Wait);
+        let data = slice.get_mapped_range().to_vec();
+        buffer.unmap();
+        Some(data)
     }
 
     /// Megvárja a GPU-t (benchmarkhoz).
@@ -438,6 +529,79 @@ fn create_timers(device: &wgpu::Device, features: wgpu::Features) -> Option<Time
         readback,
         flush,
     })
+}
+
+/// A videó-réteg pipeline-ja: egy textúra + lineáris sampler.
+fn create_video_resources(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> (wgpu::BindGroupLayout, wgpu::Sampler, wgpu::RenderPipeline) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("video-shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+    });
+    let video_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("video-bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let video_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("video-sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("video-pipeline-layout"),
+        bind_group_layouts: &[&video_bgl],
+        push_constant_ranges: &[],
+    });
+    let video_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("video-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_video"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_video"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+    (video_bgl, video_sampler, video_pipeline)
 }
 
 fn create_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {

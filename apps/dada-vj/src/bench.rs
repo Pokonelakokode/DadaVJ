@@ -12,9 +12,84 @@
 //! diagnosztika: a mérvadó szám a batch-különbség.
 
 use crate::renderer::Renderer;
+use crate::video::VideoLayer;
 use crate::Args;
-use anyhow::Result;
-use std::time::Instant;
+use anyhow::{bail, Result};
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+/// Automatikus validáció: a shader tényleg a dekódolt videót mintavételezi-e?
+///
+/// Offscreen renderel, és a kép közepéről olvas vissza pixeleket több
+/// időpontban. Ha a színek változnak (és nem feketék), a lánc él.
+pub async fn video_check(args: &Args) -> Result<()> {
+    let Some(path) = &args.video else {
+        bail!("a --video-check-hez kell --video <fájl>");
+    };
+    let mut renderer = Renderer::new_offscreen(1920, 1080, wgpu::TextureFormat::Bgra8UnormSrgb).await?;
+    let mut video = VideoLayer::open(renderer.device(), Path::new(path), 1.0)?;
+    println!(
+        "VIDEO-CHECK — {path} ({}x{}, {:.2} fps névleges)",
+        video.size.0,
+        video.size.1,
+        video.nominal_fps()
+    );
+
+    let start = Instant::now();
+    let mut samples: Vec<(u32, [u8; 3])> = Vec::new();
+    let frames = 240;
+    for i in 0..frames {
+        // Szimulált 60 fps-es óra, hogy a videó valóban előre haladjon.
+        let now = start + Duration::from_secs_f64(i as f64 / 60.0);
+        let view = video.advance(renderer.device(), now)?;
+        renderer.render(0.0, 0.0, 1, view)?;
+        if i % 24 == 0 {
+            if let Some(px) = renderer.read_back_center(4, 4) {
+                let mut sum = [0u32; 3];
+                let mut n = 0u32;
+                for chunk in px.chunks_exact(4) {
+                    // BGRA
+                    sum[0] += chunk[2] as u32;
+                    sum[1] += chunk[1] as u32;
+                    sum[2] += chunk[0] as u32;
+                    n += 1;
+                }
+                if n > 0 {
+                    samples.push((
+                        i,
+                        [
+                            (sum[0] / n) as u8,
+                            (sum[1] / n) as u8,
+                            (sum[2] / n) as u8,
+                        ],
+                    ));
+                }
+            }
+        }
+    }
+    renderer.wait_idle();
+    println!(
+        "  dekódolt: {} frame · megjelenített: {} · utolsó PTS: {:.2} s",
+        video.frames_decoded, video.frames_shown, video.last_pts
+    );
+    println!("  középső pixel (RGB) a kimeneten:");
+    for (i, c) in &samples {
+        println!("    frame {i:>3}: R={:>3} G={:>3} B={:>3}", c[0], c[1], c[2]);
+    }
+    let distinct = {
+        let mut set = std::collections::BTreeSet::new();
+        for (_, c) in &samples {
+            set.insert(*c);
+        }
+        set.len()
+    };
+    println!("  különböző színminta: {distinct}");
+    if distinct < 2 {
+        bail!("a kimenet nem változik — a videó nem jut el a shaderig");
+    }
+    println!("  OK: a videó a shaderen keresztül jelenik meg.");
+    Ok(())
+}
 
 const BATCH: u32 = 600;
 const WARMUP: u32 = 120;
@@ -23,7 +98,7 @@ fn batch(renderer: &mut Renderer, frames: u32, layers: u32) -> f64 {
     let start = Instant::now();
     for i in 0..frames {
         let t = i as f32 * 0.016;
-        let _ = renderer.render(t, t * 2.0, layers);
+        let _ = renderer.render(t, t * 2.0, layers, None);
     }
     renderer.wait_idle();
     start.elapsed().as_secs_f64()

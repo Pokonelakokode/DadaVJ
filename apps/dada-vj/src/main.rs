@@ -7,6 +7,7 @@ mod app;
 mod bench;
 mod hud;
 mod renderer;
+mod video;
 
 use anyhow::Result;
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -23,6 +24,10 @@ pub struct Args {
     pub layers: u32,
     /// Headless nyers benchmark: ennyi frame-et mér ablak és vsync nélkül.
     pub raw_bench: Option<u32>,
+    /// Videófájl, amit a videó-rétegben lejátszunk (zero-copy GPU úton).
+    pub video: Option<String>,
+    /// Automatikus videó-validáció (offscreen render + pixel-visszaolvasás).
+    pub video_check: bool,
 }
 
 impl Default for Args {
@@ -35,6 +40,8 @@ impl Default for Args {
             fullscreen: false,
             layers: 1,
             raw_bench: None,
+            video: None,
+            video_check: false,
         }
     }
 }
@@ -65,11 +72,13 @@ impl Args {
                     let v = it.next().unwrap_or_else(|| "1".into());
                     args.layers = v.parse()?;
                 }
+                "--video" => args.video = it.next(),
+                "--video-check" => args.video_check = true,
                 "--no-vsync" => args.vsync = false,
                 "--fullscreen" => args.fullscreen = true,
                 "-h" | "--help" => {
                     println!(
-                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
+                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
                         env!("CARGO_PKG_VERSION")
                     );
                     std::process::exit(0);
@@ -84,6 +93,11 @@ impl Args {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse()?;
+
+    // Headless videó-validáció.
+    if args.video_check {
+        return pollster::block_on(bench::video_check(&args));
+    }
 
     // Headless mód: nem kell ablak, nem kell WindowServer.
     if args.raw_bench.is_some() {

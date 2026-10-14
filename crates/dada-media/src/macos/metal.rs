@@ -54,6 +54,23 @@ pub struct MetalTextureCache {
     _device: metal::Device,
 }
 
+/// Egy becsomagolt frame: a wgpu textúra + a hozzá tartozó CoreVideo-binding.
+///
+/// A binding (CVMetalTexture) életben tartja a dekódolt pixel buffert, ezért
+/// **addig kell életben tartani, amíg a GPU be nem fejezi a frame renderelését**
+/// (a hívó egy ring-pufferben tartja a legutóbbi néhány frame-et).
+pub struct WrappedFrame {
+    pub texture: wgpu::Texture,
+    _binding: CFRetained<CVMetalTexture>,
+}
+
+impl WrappedFrame {
+    pub fn view(&self) -> wgpu::TextureView {
+        self.texture
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    }
+}
+
 impl MetalTextureCache {
     pub fn new(device: &wgpu::Device) -> Result<Self> {
         use metal::foreign_types::ForeignType;
@@ -101,7 +118,7 @@ impl MetalTextureCache {
         pixel_buffer: &CVPixelBuffer,
         width: u32,
         height: u32,
-    ) -> Result<(wgpu::Texture, CFRetained<CVMetalTexture>)> {
+    ) -> Result<WrappedFrame> {
         let cv_texture = create_cv_metal_texture(
             &self.cache,
             pixel_buffer,
@@ -158,6 +175,9 @@ impl MetalTextureCache {
             })
         }?;
 
-        Ok((texture, cv_texture))
+        Ok(WrappedFrame {
+            texture,
+            _binding: cv_texture,
+        })
     }
 }

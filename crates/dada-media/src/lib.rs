@@ -9,4 +9,7 @@ pub mod frame;
 pub mod macos;
 
 #[cfg(target_os = "macos")]
+pub use macos::metal::{MetalTextureCache, WrappedFrame};
+
+#[cfg(target_os = "macos")]
 pub use macos::reader::{fourcc, Frame, VideoReader};

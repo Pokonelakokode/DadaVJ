@@ -421,6 +421,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "dada-core",
+ "dada-media",
  "env_logger",
  "log",
  "pollster",

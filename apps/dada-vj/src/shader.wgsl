@@ -34,6 +34,38 @@ struct VOut {
     @location(0) @interpolate(flat) layer : u32,
 };
 
+// ---------------------------------------------------------------------------
+// Videó-réteg: zero-copy MTLTexture (CVPixelBuffer/IOSurface) mintavételezése.
+// ---------------------------------------------------------------------------
+
+@group(0) @binding(0) var video_tex : texture_2d<f32>;
+@group(0) @binding(1) var video_sampler : sampler;
+
+struct VOutVideo {
+    @builtin(position) pos : vec4<f32>,
+    @location(0) uv : vec2<f32>,
+};
+
+@vertex
+fn vs_video(@builtin(vertex_index) vi : u32) -> VOutVideo {
+    var p = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0)
+    );
+    var o : VOutVideo;
+    o.pos = vec4<f32>(p[vi], 0.0, 1.0);
+    // A textúra Y-ja lefelé nő, az NDC Y-ja felfelé.
+    o.uv = vec2<f32>((p[vi].x + 1.0) * 0.5, 1.0 - (p[vi].y + 1.0) * 0.5);
+    return o;
+}
+
+@fragment
+fn fs_video(in : VOutVideo) -> @location(0) vec4<f32> {
+    let c = textureSample(video_tex, video_sampler, in.uv);
+    return vec4<f32>(c.rgb, 1.0);
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) vi : u32, @builtin(instance_index) inst : u32) -> VOut {
     var p = array<vec2<f32>, 3>(

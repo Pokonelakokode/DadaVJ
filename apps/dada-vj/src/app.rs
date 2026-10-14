@@ -2,6 +2,7 @@
 
 use crate::hud::FrameStats;
 use crate::renderer::Renderer;
+use crate::video::VideoLayer;
 use crate::Args;
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,6 +16,7 @@ pub struct App {
     args: Args,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    video: Option<VideoLayer>,
     stats: FrameStats,
     started: Instant,
     last_frame: Instant,
@@ -28,6 +30,7 @@ impl App {
             args,
             window: None,
             renderer: None,
+            video: None,
             stats: FrameStats::new(3600),
             started: now,
             last_frame: now,
@@ -44,8 +47,23 @@ impl App {
         // 120 BPM szintetikus beat, amíg a MIDI clock/Link be nem köt.
         let beat = t * 2.0;
 
-        if let (Some(renderer), Some(window)) = (self.renderer.as_mut(), self.window.as_ref()) {
-            match renderer.render(t, beat, self.args.layers) {
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        let device = renderer.device().clone();
+        let now = Instant::now();
+        let video_view = match self.video.as_mut() {
+            Some(video) => match video.advance(&device, now) {
+                Ok(view) => view,
+                Err(e) => {
+                    log::error!("videó hiba: {e:#}");
+                    None
+                }
+            },
+            None => None,
+        };
+        if let Some(window) = self.window.as_ref() {
+            match renderer.render(t, beat, self.args.layers, video_view) {
                 Ok(()) => {
                     // Csak a vsync-hez igazított, tényleges frame-eket mérjük.
                     self.stats.push(dt_ms as f32);
@@ -122,6 +140,21 @@ impl ApplicationHandler for App {
         log::info!("ablak létrehozva: {:?}", window.inner_size());
         let renderer = pollster::block_on(Renderer::new_surface(window.clone(), self.args.vsync))
             .expect("nem sikerült a renderert inicializálni");
+        if let Some(path) = self.args.video.clone() {
+            match VideoLayer::open(renderer.device(), std::path::Path::new(&path), 1.0) {
+                Ok(layer) => {
+                    log::info!(
+                        "videó-réteg: {} ({}x{}, {:.2} fps névleges)",
+                        path,
+                        layer.size.0,
+                        layer.size.1,
+                        layer.nominal_fps()
+                    );
+                    self.video = Some(layer);
+                }
+                Err(e) => log::error!("a videó nem nyitható meg: {e:#}"),
+            }
+        }
         self.renderer = Some(renderer);
         self.window = Some(window.clone());
         self.started = Instant::now();

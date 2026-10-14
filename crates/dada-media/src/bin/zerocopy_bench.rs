@@ -56,7 +56,7 @@ async fn run() -> Result<()> {
 
     // GPU-biztonság: a legutóbbi frame-ek textúráit életben tartjuk, amíg a GPU
     // be nem fejezi a használatukat.
-    let mut alive: VecDeque<(wgpu::Texture, _)> = VecDeque::with_capacity(8);
+    let mut alive: VecDeque<dada_media::WrappedFrame> = VecDeque::with_capacity(8);
 
     let start = Instant::now();
     let mut count: u32 = 0;
@@ -73,15 +73,16 @@ async fn run() -> Result<()> {
         }
 
         let t0 = Instant::now();
-        let (texture, cv_texture) =
+        let wrapped =
             cache.wrap_bgra(&device, &frame.pixel_buffer, frame.width, frame.height)?;
         wrap_ns += t0.elapsed().as_nanos();
 
         if count == 10 {
-            sample_pixels = read_back_pixels(&device, &queue, &texture, frame.width, frame.height);
+            sample_pixels =
+                read_back_pixels(&device, &queue, &wrapped.texture, frame.width, frame.height);
         }
 
-        alive.push_back((texture, cv_texture));
+        alive.push_back(wrapped);
         while alive.len() > 6 {
             alive.pop_front();
         }
