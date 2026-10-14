@@ -8,7 +8,9 @@ use crate::web::{self, Command, WebShared};
 use crate::Args;
 use dada_audio::AudioEngine;
 use dada_fx::Effect;
-use dada_core::{Autopilot, AutopilotMode, Clip, ClipSource, Deck, DeckEvent, Mixer, Quantize};
+use dada_core::{
+    Autopilot, AutopilotMode, BlendMode, Clip, ClipSource, Deck, DeckEvent, Mixer, Quantize,
+};
 use dada_midi::{EnvelopeSpec, Mapping, MidiEngine, Trigger};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -33,6 +35,10 @@ pub struct App {
     shader_mtime: Option<SystemTime>,
     last_shader_check: Instant,
     web: Option<Arc<WebShared>>,
+    /// Réteg-opacitások, ha több réteg van egyszerre.
+    video_opacity: f32,
+    shader_opacity: f32,
+    audio_opacity: f32,
     last_preview: Instant,
     last_fps: f32,
     stats: FrameStats,
@@ -58,6 +64,9 @@ impl App {
             shader_mtime: None,
             last_shader_check: Instant::now(),
             web: None,
+            video_opacity: 1.0,
+            shader_opacity: 0.45,
+            audio_opacity: 0.7,
             last_preview: Instant::now(),
             last_fps: 0.0,
             stats: FrameStats::new(3600),
@@ -168,9 +177,30 @@ impl App {
             }
         }
 
-        // A látható réteg kiválasztása: shader > audio > videó.
+        // A réteglista összeállítása alulról felfelé: videó, ISF shader, audio.
         let (w, h) = renderer.size();
-        let mut layer: Option<LayerRef> = None;
+        let mut layers: Vec<LayerRef> = Vec::new();
+
+        // Egyedüli rétegként teljes opacity, együtt a beállított értékek.
+        let active_count = video_view.is_some() as usize
+            + self.shader.is_some() as usize
+            + self.audio.is_some() as usize;
+        let single = active_count <= 1;
+        let video_opacity = if single { 1.0 } else { self.video_opacity };
+        let shader_opacity = if single { 1.0 } else { self.shader_opacity };
+        let audio_opacity = if single { 1.0 } else { self.audio_opacity };
+
+        // 1. Videó-réteg (deck) — Normal.
+        if let Some(view) = video_view {
+            let bind_group = renderer.make_video_bind_group(view);
+            renderer.set_video_opacity(renderer.queue(), video_opacity);
+            layers.push(LayerRef {
+                pipeline: renderer.video_pipeline(BlendMode::Normal).clone(),
+                bind_group,
+            });
+        }
+
+        // 2. ISF shader réteg — Add.
         if self.shader.is_some() {
             // Hot-reload: ha a fájl megváltozott, újrafordítjuk.
             if self.last_shader_check.elapsed() > Duration::from_millis(800) {
@@ -213,21 +243,26 @@ impl App {
                     }
                 }
             }
+            effect.opacity = shader_opacity;
             effect.update(renderer.queue(), [w as f32, h as f32], t, dt_ms as f32 / 1000.0);
-            layer = Some(LayerRef {
-                pipeline: effect.pipeline(),
-                bind_group: effect.bind_group(),
+            layers.push(LayerRef {
+                pipeline: effect.pipeline(BlendMode::Add).clone(),
+                bind_group: effect.bind_group().clone(),
             });
-        } else if let Some((engine, vis)) = self.audio.as_mut() {
+        }
+
+        // 3. Audio-vizuál réteg — Screen.
+        if let Some((engine, vis)) = self.audio.as_mut() {
             let snapshot = engine.process();
+            vis.opacity = audio_opacity;
             vis.update(renderer.queue(), &snapshot, t, w, h);
-            layer = Some(LayerRef {
-                pipeline: vis.pipeline(),
-                bind_group: vis.bind_group(),
+            layers.push(LayerRef {
+                pipeline: vis.pipeline(BlendMode::Screen).clone(),
+                bind_group: vis.bind_group().clone(),
             });
         }
         if let Some(window) = self.window.as_ref() {
-            match renderer.render(t, beat, self.args.layers, video_view, layer) {
+            match renderer.render(t, beat, &layers) {
                 Ok(()) => {
                     // Csak a vsync-hez igazított, tényleges frame-eket mérjük.
                     self.stats.push(dt_ms as f32);
@@ -260,7 +295,7 @@ impl App {
         // Web: előnézet + állapot ~10 fps-en.
         if self.web.is_some() && self.last_preview.elapsed() > Duration::from_millis(100) {
             self.last_preview = Instant::now();
-            if let Some(rgb) = renderer.capture_preview(video_view, layer, t, beat) {
+            if let Some(rgb) = renderer.capture_preview(&layers, t, beat) {
                 let mut jpeg = Vec::new();
                 let encoder = jpeg_encoder::Encoder::new(&mut jpeg, 72);
                 if encoder

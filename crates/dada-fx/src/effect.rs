@@ -1,6 +1,9 @@
 //! ISF shader -> wgpu pipeline (uniformokkal, hot-reload-dal).
 
 use anyhow::Result;
+use dada_core::BlendMode;
+
+use crate::blend::{blend_index, blend_state};
 use crate::isf::IsfShader;
 
 /// A teljes képernyős háromszög, ami a fragment shadernek átadja a normált
@@ -28,12 +31,14 @@ fn vs_main(@builtin(vertex_index) vi : u32) -> VOut {
 
 /// Egy renderelhető ISF effekt: pipeline + uniform puffer + paraméterértékek.
 pub struct Effect {
-    pipeline: wgpu::RenderPipeline,
+    pipelines: [wgpu::RenderPipeline; 4],
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
     pub shader: IsfShader,
     pub values: Vec<[f32; 4]>,
     pub frames: u32,
+    /// A layer átlátszósága (0..1), a shader alpha-jába épül.
+    pub opacity: f32,
     format: wgpu::TextureFormat,
 }
 
@@ -74,15 +79,16 @@ impl Effect {
             }],
         });
 
-        let pipeline = build_pipeline(device, format, &shader.wgsl_fragment, &bgl)?;
+        let pipelines = build_pipelines(device, format, &shader.wgsl_fragment, &bgl)?;
 
         Ok(Self {
-            pipeline,
+            pipelines,
             bind_group,
             uniform_buffer,
             shader,
             values,
             frames: 0,
+            opacity: 1.0,
             format,
         })
     }
@@ -103,8 +109,8 @@ impl Effect {
                     .unwrap_or(p.default)
             })
             .collect();
-        let bgl_layout = self.pipeline.get_bind_group_layout(0);
-        let pipeline = build_pipeline(device, self.format, &shader.wgsl_fragment, &bgl_layout)?;
+        let bgl_layout = self.pipelines[0].get_bind_group_layout(0);
+        let pipelines = build_pipelines(device, self.format, &shader.wgsl_fragment, &bgl_layout)?;
         let size = shader.uniform_size.max(64);
         if size != self.uniform_buffer.size() {
             anyhow::bail!(
@@ -113,15 +119,15 @@ impl Effect {
                 size
             );
         }
-        self.pipeline = pipeline;
+        self.pipelines = pipelines;
         self.shader = shader;
         self.values = values;
         self.frames = 0;
         Ok(())
     }
 
-    pub fn pipeline(&self) -> &wgpu::RenderPipeline {
-        &self.pipeline
+    pub fn pipeline(&self, mode: BlendMode) -> &wgpu::RenderPipeline {
+        &self.pipelines[blend_index(mode)]
     }
 
     pub fn bind_group(&self) -> &wgpu::BindGroup {
@@ -146,7 +152,7 @@ impl Effect {
         self.shader.write_uniform_block(
             &mut bytes,
             &self.values,
-            (self.frames as f32, 0.0),
+            (self.frames as f32, 0.0, self.opacity),
             resolution,
             time,
             delta,
@@ -156,11 +162,33 @@ impl Effect {
     }
 }
 
+/// A négy blend módhoz négy pipeline (a blend a pipeline állapota).
+fn build_pipelines(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    fragment_wgsl: &str,
+    bgl: &wgpu::BindGroupLayout,
+) -> Result<[wgpu::RenderPipeline; 4]> {
+    let modes = [
+        BlendMode::Normal,
+        BlendMode::Add,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+    ];
+    Ok([
+        build_pipeline(device, format, fragment_wgsl, bgl, blend_state(modes[0]))?,
+        build_pipeline(device, format, fragment_wgsl, bgl, blend_state(modes[1]))?,
+        build_pipeline(device, format, fragment_wgsl, bgl, blend_state(modes[2]))?,
+        build_pipeline(device, format, fragment_wgsl, bgl, blend_state(modes[3]))?,
+    ])
+}
+
 fn build_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     fragment_wgsl: &str,
     bgl: &wgpu::BindGroupLayout,
+    blend: wgpu::BlendState,
 ) -> Result<wgpu::RenderPipeline> {
     let vs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("isf-vertex"),
@@ -189,7 +217,7 @@ fn build_pipeline(
             entry_point: Some("main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::REPLACE),
+                blend: Some(blend),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),

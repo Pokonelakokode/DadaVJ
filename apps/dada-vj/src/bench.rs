@@ -13,6 +13,7 @@
 
 use crate::audio_vis::AudioVisual;
 use crate::renderer::{LayerRef, Renderer};
+use dada_core::BlendMode;
 use crate::video::VideoLayer;
 use dada_audio::AudioEngine;
 use dada_fx::{Effect, IsfShader};
@@ -105,16 +106,11 @@ pub async fn midi_check(args: &Args) -> Result<()> {
 
         let t = now as f32;
         effect.update(renderer.queue(), [width as f32, height as f32], t, 1.0 / 60.0);
-        renderer.render(
-            t,
-            0.0,
-            1,
-            None,
-            Some(LayerRef {
-                pipeline: effect.pipeline(),
-                bind_group: effect.bind_group(),
-            }),
-        )?;
+        let layers = [LayerRef {
+            pipeline: effect.pipeline(BlendMode::Normal).clone(),
+            bind_group: effect.bind_group().clone(),
+        }];
+        renderer.render(t, 0.0, &layers)?;
 
         if i % 20 == 0 {
             if let Some(px) = renderer.read_back_center(8, 8) {
@@ -227,16 +223,11 @@ pub async fn shader_check(args: &Args) -> Result<()> {
             effect.set_param(0, [v, 0.0, 0.0, 0.0]);
         }
         effect.update(renderer.queue(), [width as f32, height as f32], t, 1.0 / 60.0);
-        renderer.render(
-            t,
-            0.0,
-            1,
-            None,
-            Some(LayerRef {
-                pipeline: effect.pipeline(),
-                bind_group: effect.bind_group(),
-            }),
-        )?;
+        let layers = [LayerRef {
+            pipeline: effect.pipeline(BlendMode::Normal).clone(),
+            bind_group: effect.bind_group().clone(),
+        }];
+        renderer.render(t, 0.0, &layers)?;
         if i % 20 == 0 {
             if let Some(px) = renderer.read_back_center(8, 8) {
                 let mut sum = [0u32; 3];
@@ -314,16 +305,11 @@ pub async fn audio_check(_args: &Args) -> Result<()> {
         }
         let t = i as f32 / 60.0;
         vis.update(renderer.queue(), &snap, t, width, height);
-        renderer.render(
-            t,
-            0.0,
-            1,
-            None,
-            Some(LayerRef {
-                pipeline: vis.pipeline(),
-                bind_group: vis.bind_group(),
-            }),
-        )?;
+        let layers = [LayerRef {
+            pipeline: vis.pipeline(BlendMode::Normal).clone(),
+            bind_group: vis.bind_group().clone(),
+        }];
+        renderer.render(t, 0.0, &layers)?;
         if i % 30 == 0 {
             if let Some(px) = renderer.read_back_center(4, 4) {
                 let mut sum = [0u32; 3];
@@ -429,7 +415,15 @@ pub async fn video_check(args: &Args) -> Result<()> {
         // Szimulált 60 fps-es óra, hogy a videó valóban előre haladjon.
         let now = start + Duration::from_secs_f64(i as f64 / 60.0);
         let view = video.advance(renderer.device(), now)?;
-        renderer.render(0.0, 0.0, 1, view, None)?;
+        if let Some(view) = view {
+            let bind_group = renderer.make_video_bind_group(view);
+            renderer.set_video_opacity(renderer.queue(), 1.0);
+            let layers = [LayerRef {
+                pipeline: renderer.video_pipeline(BlendMode::Normal).clone(),
+                bind_group,
+            }];
+            renderer.render(i as f32 / 60.0, 0.0, &layers)?;
+        }
         if i % 24 == 0 {
             if let Some(px) = renderer.read_back_center(4, 4) {
                 let mut sum = [0u32; 3];
@@ -485,7 +479,7 @@ fn batch(renderer: &mut Renderer, frames: u32, layers: u32) -> f64 {
     let start = Instant::now();
     for i in 0..frames {
         let t = i as f32 * 0.016;
-        let _ = renderer.render(t, t * 2.0, layers, None, None);
+        let _ = renderer.render(t, t * 2.0, &[]);
     }
     renderer.wait_idle();
     start.elapsed().as_secs_f64()

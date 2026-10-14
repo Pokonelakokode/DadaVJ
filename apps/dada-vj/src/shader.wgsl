@@ -41,6 +41,14 @@ struct VOut {
 @group(0) @binding(0) var video_tex : texture_2d<f32>;
 @group(0) @binding(1) var video_sampler : sampler;
 
+struct VideoParams {
+    opacity : f32,
+    _pad0 : f32,
+    _pad1 : f32,
+    _pad2 : f32,
+};
+@group(0) @binding(2) var<uniform> video_params : VideoParams;
+
 struct VOutVideo {
     @builtin(position) pos : vec4<f32>,
     @location(0) uv : vec2<f32>,
@@ -63,7 +71,8 @@ fn vs_video(@builtin(vertex_index) vi : u32) -> VOutVideo {
 @fragment
 fn fs_video(in : VOutVideo) -> @location(0) vec4<f32> {
     let c = textureSample(video_tex, video_sampler, in.uv);
-    return vec4<f32>(c.rgb, 1.0);
+    // Az alpha hordozza a layer-opacity-t (a blend src=SrcAlpha-t használ).
+    return vec4<f32>(c.rgb, video_params.opacity);
 }
 
 @vertex
@@ -202,6 +211,7 @@ fn fs_audio(in : VOutAudio) -> @location(0) vec4<f32> {
     let d = length(uv - vec2<f32>(0.5, 0.5)) * 1.15;
     c *= 1.0 - clamp(d, 0.0, 1.0) * 0.28;
 
-    return vec4<f32>(c, 1.0);
+    // Az alpha = layer-opacity (a resolution.z-ben érkezik).
+    return vec4<f32>(c, au.resolution.z);
 }
 

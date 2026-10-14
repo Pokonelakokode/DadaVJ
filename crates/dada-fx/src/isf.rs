@@ -156,7 +156,7 @@ impl IsfShader {
         &self,
         buffer: &mut [u8],
         values: &[[f32; 4]],
-        frame: (f32, f32),
+        frame: (f32, f32, f32),
         resolution: [f32; 2],
         time: f32,
         delta: f32,
@@ -171,7 +171,7 @@ impl IsfShader {
         };
         // A fejléc: 2 db vec4 (render info + frame info).
         put(buffer, 0, &[resolution[0], resolution[1], time, delta]);
-        put(buffer, 16, &[frame.0, frame.1, 0.0, 0.0]);
+        put(buffer, 16, &[frame.0, frame.1, frame.2, 0.0]);
         for (i, p) in self.params.iter().enumerate() {
             let v = values.get(i).copied().unwrap_or(p.default);
             put(buffer, p.offset, &v[..p.kind.components()]);
@@ -316,8 +316,34 @@ pub fn translate(body: &str, params: &[Param]) -> Result<String> {
     if !module.entry_points.iter().any(|e| e.name == "main") {
         bail!("nincs main() a shaderben");
     }
-    naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
-        .map_err(|e| anyhow!("WGSL kiírás: {e:?}"))
+    let wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
+        .map_err(|e| anyhow!("WGSL kiírás: {e:?}"))?;
+    Ok(inject_layer_opacity(&wgsl))
+}
+
+/// A layer-opacity beillesztése a generált WGSL-be.
+///
+/// A naga kimenete kiszámítható alakú: a fragment main a végén
+///   return FragmentOutput(<expr>);
+/// formában tér vissza. Ezt cseréljük ki úgy, hogy az alpha az
+/// _isf_frame.z (layer-opacity) értékkel skálázódjon.
+fn inject_layer_opacity(wgsl: &str) -> String {
+    let needle = "return FragmentOutput(";
+    let Some(pos) = wgsl.rfind(needle) else {
+        return wgsl.to_string();
+    };
+    let rest = &wgsl[pos + needle.len()..];
+    let Some(end) = rest.find(");") else {
+        return wgsl.to_string();
+    };
+    let expr = &rest[..end];
+    let mut out = String::with_capacity(wgsl.len() + 80);
+    out.push_str(&wgsl[..pos]);
+    out.push_str(&format!(
+        "return FragmentOutput(vec4<f32>({expr}.rgb, {expr}.a * global._isf_frame.z));"
+    ));
+    out.push_str(&rest[end + 2..]);
+    out
 }
 
 #[cfg(test)]
@@ -411,4 +437,20 @@ void main() { gl_FragColor = vec4(k, 0.0, 0.0, 1.0); }
         assert_eq!(s.params.len(), 1);
         assert_eq!(s.skipped.len(), 1);
     }
+}
+
+#[cfg(test)]
+mod wgsl_dump {
+
+#[test]
+fn dump_wgsl_shape() {
+    let src = r#"/*{
+  "INPUTS": [ { "NAME": "k", "TYPE": "float", "DEFAULT": 1.0 } ]
+}*/
+void main() { gl_FragColor = vec4(k, 0.5, 0.2, 1.0); }
+"#;
+    let s = crate::isf::IsfShader::from_source(src, std::path::PathBuf::from("t.isf")).unwrap();
+    println!("--- WGSL ---\n{}", s.wgsl_fragment);
+}
+
 }

@@ -8,6 +8,8 @@
 //! A spektrogram csak akkor megy fel újra, ha valóban készült új oszlop.
 
 use bytemuck::{Pod, Zeroable};
+use dada_core::BlendMode;
+use dada_fx::{blend_index, blend_state};
 use dada_audio::{
     AnalyzerSnapshot, BANDS, SPECTROGRAM_COLS, SPECTROGRAM_ROWS, SPECTRUM_BINS, WAVEFORM_SAMPLES,
 };
@@ -23,7 +25,9 @@ struct AudioUniforms {
 
 /// Egy renderelhető audio-réteg: pipeline + bind group.
 pub struct AudioVisual {
-    pipeline: wgpu::RenderPipeline,
+    pipelines: [wgpu::RenderPipeline; 4],
+    /// A layer átlátszósága (0..1).
+    pub opacity: f32,
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
     waveform_tex: wgpu::Texture,
@@ -125,34 +129,49 @@ impl AudioVisual {
             bind_group_layouts: &[&bgl],
             push_constant_ranges: &[],
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("audio-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_audio"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_audio"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        let modes = [
+            BlendMode::Normal,
+            BlendMode::Add,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+        ];
+        let make = |mode: BlendMode| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("audio-pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_audio"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_audio"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(blend_state(mode)),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let pipelines = [
+            make(modes[0]),
+            make(modes[1]),
+            make(modes[2]),
+            make(modes[3]),
+        ];
 
         Self {
-            pipeline,
+            pipelines,
+            opacity: 1.0,
             bind_group,
             uniform_buffer,
             waveform_tex,
@@ -165,8 +184,8 @@ impl AudioVisual {
         }
     }
 
-    pub fn pipeline(&self) -> &wgpu::RenderPipeline {
-        &self.pipeline
+    pub fn pipeline(&self, mode: BlendMode) -> &wgpu::RenderPipeline {
+        &self.pipelines[blend_index(mode)]
     }
 
     pub fn bind_group(&self) -> &wgpu::BindGroup {
@@ -231,7 +250,7 @@ impl AudioVisual {
         bands2[2] = st.flux;
         bands2[3] = if st.onset { 1.0 } else { 0.0 };
         let uniforms = AudioUniforms {
-            resolution: [width as f32, height as f32, 0.0, 0.0],
+            resolution: [width as f32, height as f32, self.opacity, 0.0],
             info: [row as f32, time, st.rms, st.peak],
             bands,
             bands2,

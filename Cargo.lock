@@ -535,6 +535,7 @@ name = "dada-fx"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dada-core",
  "naga",
  "serde",
  "serde_json",
