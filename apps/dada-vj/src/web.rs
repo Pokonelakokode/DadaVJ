@@ -16,6 +16,28 @@ pub enum Command {
     SetParam { index: usize, value: f32 },
     /// MIDI note szimulálása (ugyanazon az úton megy, mint a hardveres).
     Trigger { note: u8, velocity: u8 },
+    /// Klip indítása a deck bankjából (kvantáltan).
+    Launch { deck: usize, clip: usize },
+    /// Autopilot beállítása.
+    SetAutopilot {
+        deck: usize,
+        mode: String,
+        every_beats: f64,
+    },
+    /// Deck opacity/blend beállítása.
+    SetDeck {
+        deck: usize,
+        opacity: Option<f32>,
+        blend: Option<String>,
+    },
+    /// Modulációs útvonal hozzáadása.
+    ModAdd {
+        source: String,
+        target: String,
+        amount: f32,
+    },
+    /// Modulációs útvonal törlése.
+    ModRemove { index: usize },
 }
 
 pub struct WebShared {
@@ -143,6 +165,66 @@ fn handle(mut request: tiny_http::Request, shared: &Arc<WebShared>) -> Result<()
                         let velocity =
                             v.get("velocity").and_then(|n| n.as_u64()).unwrap_or(100) as u8;
                         shared.push_command(Command::Trigger { note, velocity });
+                        ok = true;
+                    }
+                    Some("launch") => {
+                        let deck = v.get("deck").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+                        let clip = v.get("clip").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+                        shared.push_command(Command::Launch { deck, clip });
+                        ok = true;
+                    }
+                    Some("autopilot") => {
+                        let deck = v.get("deck").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+                        let mode = v
+                            .get("mode")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("off")
+                            .to_string();
+                        let every_beats =
+                            v.get("every_beats").and_then(|n| n.as_f64()).unwrap_or(16.0);
+                        shared.push_command(Command::SetAutopilot {
+                            deck,
+                            mode,
+                            every_beats,
+                        });
+                        ok = true;
+                    }
+                    Some("deck") => {
+                        let deck = v.get("deck").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+                        let opacity = v.get("opacity").and_then(|n| n.as_f64()).map(|f| f as f32);
+                        let blend = v
+                            .get("blend")
+                            .and_then(|m| m.as_str())
+                            .map(|s| s.to_string());
+                        shared.push_command(Command::SetDeck {
+                            deck,
+                            opacity,
+                            blend,
+                        });
+                        ok = true;
+                    }
+                    Some("mod_add") => {
+                        let source = v
+                            .get("source")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let target = v
+                            .get("target")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let amount = v.get("amount").and_then(|n| n.as_f64()).unwrap_or(1.0) as f32;
+                        shared.push_command(Command::ModAdd {
+                            source,
+                            target,
+                            amount,
+                        });
+                        ok = true;
+                    }
+                    Some("mod_remove") => {
+                        let index = v.get("index").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+                        shared.push_command(Command::ModRemove { index });
                         ok = true;
                     }
                     _ => {}

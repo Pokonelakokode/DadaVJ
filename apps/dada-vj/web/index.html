@@ -7,34 +7,42 @@
 <style>
  :root { --bg:#0b0c10; --panel:#14161c; --line:#242833; --fg:#e8ecf1; --dim:#8b95a6; --accent:#ff7a3c; --accent2:#3cc8ff; }
  * { box-sizing: border-box; }
- body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif; }
+ body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif; }
  header { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--line); }
- h1 { font-size:15px; margin:0; letter-spacing:.08em; text-transform:uppercase; }
+ h1 { font-size:14px; margin:0; letter-spacing:.08em; text-transform:uppercase; }
  .dot { width:8px;height:8px;border-radius:50%;background:var(--accent); box-shadow:0 0 12px var(--accent); }
- main { display:grid; grid-template-columns: minmax(0,2fr) minmax(280px,1fr); gap:16px; padding:16px; }
- @media (max-width: 900px){ main{ grid-template-columns:1fr; } }
- .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
- img#preview { width:100%; border-radius:6px; background:#000; display:block; min-height:120px; }
- .stats { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }
- .stat { background:#0f1116; border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
- .stat b { display:block; font-size:18px; font-variant-numeric: tabular-nums; }
- .stat span { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
- .param { margin:10px 0; }
- .param label { display:flex; justify-content:space-between; font-size:12px; color:var(--dim); }
- input[type=range]{ width:100%; accent-color:var(--accent); }
- button { background:#1c2029; color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 14px; font-weight:600; cursor:pointer; }
+ main { display:grid; grid-template-columns: minmax(0,7fr) minmax(320px,3fr); gap:14px; padding:14px; }
+ @media (max-width: 1000px){ main{ grid-template-columns:1fr; } }
+ .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px; }
+ img#preview { width:100%; border-radius:6px; background:#000; display:block; min-height:100px; }
+ .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; }
+ .stat { background:#0f1116; border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
+ .stat b { display:block; font-size:16px; font-variant-numeric: tabular-nums; }
+ .stat span { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.06em; }
+ .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:6px; }
+ .grow { flex:1; }
+ input[type=range]{ accent-color:var(--accent); }
+ select, input[type=number], input[type=text] { background:#0f1116; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 7px; font:inherit; }
+ input[type=number]{ width:64px; }
+ button { background:#1c2029; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; font-weight:600; cursor:pointer; font:inherit; }
  button:hover { border-color:var(--accent); color:var(--accent); }
- .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+ .decks { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:12px; }
+ .deckhead { display:flex; justify-content:space-between; align-items:baseline; }
+ .dim { color:var(--dim); }
+ .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:5px; margin-top:8px; }
+ .clip { text-align:left; font-weight:500; font-size:11px; padding:7px 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+ .clip.active { border-color:var(--accent); color:#0b0c10; background:var(--accent); }
+ .clip.queued { border-color:var(--accent2); color:var(--accent2); }
+ .modrow { display:flex; justify-content:space-between; gap:8px; border-bottom:1px solid var(--line); padding:3px 0; }
+ .modrow button { padding:0 7px; }
 </style>
 </head>
 <body>
-<header><div class="dot"></div><h1>Dada VJ</h1><span id="status" style="color:var(--dim)">kapcsolodas...</span></header>
+<header><div class="dot"></div><h1>Dada VJ</h1><span id="status" class="dim">kapcsolodas...</span></header>
 <main>
   <div>
     <div class="panel"><img id="preview" src="/preview.mjpg" alt="elonezet"></div>
-  </div>
-  <div>
-    <div class="panel">
+    <div class="panel" style="margin-top:12px">
       <div class="stats">
         <div class="stat"><span>FPS</span><b id="fps">-</b></div>
         <div class="stat"><span>BPM</span><b id="bpm">-</b></div>
@@ -47,42 +55,152 @@
         <button onclick="trig(42)">Hat</button>
       </div>
     </div>
-    <div class="panel" style="margin-top:16px">
-      <div style="color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em" id="shaderName">parameterek</div>
+    <div class="decks" id="decks" style="margin-top:12px"></div>
+  </div>
+  <div>
+    <div class="panel">
+      <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em" id="shaderName">parameterek</div>
       <div id="params"></div>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">modulaciok</div>
+      <div id="mods"></div>
+      <div class="row">
+        <input type="text" id="msrc" placeholder="note:36" size="10">
+        <input type="text" id="mdst" placeholder="deck.opacity.1" size="14">
+        <input type="number" id="mamt" value="1" step="0.1" min="0" max="1">
+        <button onclick="modAdd()">+</button>
+      </div>
     </div>
   </div>
 </main>
 <script>
-var builtFor = "";
-function trig(note){
-  fetch("/api/command", {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({cmd:"trigger", note:note, velocity:110})});
+function post(body){
+  fetch("/api/command", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
 }
-function setParam(i, v){
-  fetch("/api/command", {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({cmd:"set_param", index:i, value:v})});
+function trig(note){ post({cmd:"trigger", note:note, velocity:110}); }
+function setParam(i,v){ post({cmd:"set_param", index:i, value:v}); }
+function launch(deck, clip){ post({cmd:"launch", deck:deck, clip:clip}); }
+function setAp(deck, mode, every){ post({cmd:"autopilot", deck:deck, mode:mode, every_beats:Number(every)||16}); }
+function setDeckOpacity(deck, v){ post({cmd:"deck", deck:deck, opacity:Number(v)}); }
+function setDeckBlend(deck, b){ post({cmd:"deck", deck:deck, blend:b}); }
+function modAdd(){
+  var s = document.getElementById("msrc").value.trim();
+  var t = document.getElementById("mdst").value.trim();
+  var a = Number(document.getElementById("mamt").value) || 1;
+  if (s && t) post({cmd:"mod_add", source:s, target:t, amount:a});
 }
+function modRemove(i){ post({cmd:"mod_remove", index:i}); }
+
+var builtParams = "";
 function buildParams(params){
   var key = params.map(function(p){return p.name;}).join(",");
-  if (key === builtFor) return;
-  builtFor = key;
+  if (key === builtParams) return;
+  builtParams = key;
   var host = document.getElementById("params");
   host.innerHTML = "";
   params.forEach(function(p, i){
     var div = document.createElement("div"); div.className = "param";
     var lab = document.createElement("label");
+    lab.style.display = "flex"; lab.style.justifyContent = "space-between";
+    lab.style.fontSize = "12px"; lab.style.color = "var(--dim)";
     var name = document.createElement("span"); name.textContent = p.name;
     var val = document.createElement("span"); val.textContent = Number(p.value).toFixed(2);
     lab.appendChild(name); lab.appendChild(val);
     var r = document.createElement("input");
-    r.type = "range"; r.min = p.min; r.max = p.max;
+    r.type = "range"; r.style.width = "100%"; r.min = p.min; r.max = p.max;
     r.step = (p.max - p.min) / 500; r.value = p.value;
     r.oninput = function(){ val.textContent = Number(r.value).toFixed(2); setParam(i, Number(r.value)); };
     div.appendChild(lab); div.appendChild(r);
     host.appendChild(div);
   });
 }
+
+var deckSigs = [];
+function renderDecks(decks){
+  var host = document.getElementById("decks");
+  decks.forEach(function(d, i){
+    var sig = d.name + "|" + d.clips.map(function(c){return c.name;}).join(",");
+    var el = document.getElementById("deck" + i);
+    if (!el || deckSigs[i] !== sig) {
+      if (el) el.remove();
+      el = document.createElement("div");
+      el.className = "panel"; el.id = "deck" + i;
+      var head = document.createElement("div");
+      head.className = "deckhead";
+      head.innerHTML = "<b>" + d.name + "</b><span class='dim'>" + d.clips.length + " klip</span>";
+      el.appendChild(head);
+
+      var ap = document.createElement("div"); ap.className = "row";
+      var sel = document.createElement("select");
+      ["off","sequential","shuffle","weighted"].forEach(function(m){
+        var o = document.createElement("option"); o.value = m; o.textContent = m; sel.appendChild(o);
+      });
+      var num = document.createElement("input");
+      num.type = "number"; num.min = "1"; num.max = "256"; num.value = d.autopilot.every_beats;
+      sel.onchange = function(){ setAp(i, sel.value, num.value); };
+      num.onchange = function(){ setAp(i, sel.value, num.value); };
+      ap.appendChild(sel); ap.appendChild(num);
+      el.appendChild(ap);
+
+      var mix = document.createElement("div"); mix.className = "row";
+      var op = document.createElement("input");
+      op.type = "range"; op.min = 0; op.max = 1; op.step = 0.01; op.value = d.opacity; op.className = "grow";
+      op.oninput = function(){ setDeckOpacity(i, op.value); };
+      var bl = document.createElement("select");
+      ["normal","add","screen","multiply"].forEach(function(m){
+        var o = document.createElement("option"); o.value = m; o.textContent = m; bl.appendChild(o);
+      });
+      bl.onchange = function(){ setDeckBlend(i, bl.value); };
+      mix.appendChild(op); mix.appendChild(bl);
+      el.appendChild(mix);
+
+      var grid = document.createElement("div"); grid.className = "grid";
+      d.clips.forEach(function(c, ci){
+        var t = document.createElement("button");
+        t.className = "clip";
+        t.textContent = c.name.length > 20 ? c.name.slice(0, 19) + "\u2026" : c.name;
+        t.title = c.name;
+        t.onclick = function(){ launch(i, ci); };
+        grid.appendChild(t);
+      });
+      el.appendChild(grid);
+      host.appendChild(el);
+      deckSigs[i] = sig;
+    }
+    var sels = el.querySelectorAll("select");
+    if (sels[0] && document.activeElement !== sels[0]) sels[0].value = d.autopilot.mode;
+    var numEl = el.querySelector("input[type=number]");
+    if (numEl && document.activeElement !== numEl) numEl.value = d.autopilot.every_beats;
+    var opEl = el.querySelector("input[type=range]");
+    if (opEl && document.activeElement !== opEl) opEl.value = d.opacity;
+    if (sels[1] && document.activeElement !== sels[1]) sels[1].value = d.blend;
+    var tiles = el.querySelectorAll(".clip");
+    for (var ci = 0; ci < tiles.length; ci++) {
+      tiles[ci].className = "clip" + (d.active === ci ? " active" : "") + (d.queued === ci ? " queued" : "");
+    }
+  });
+}
+
+var modSig = "";
+function renderMods(mods){
+  var sig = mods.map(function(m){return m.source + ">" + m.target + ":" + m.amount;}).join("|");
+  if (sig === modSig) return;
+  modSig = sig;
+  var host = document.getElementById("mods");
+  host.innerHTML = "";
+  mods.forEach(function(m, i){
+    var row = document.createElement("div"); row.className = "modrow";
+    var a = document.createElement("span"); a.className = "dim"; a.textContent = m.source;
+    var b = document.createElement("span"); b.textContent = "\u2192 " + m.target;
+    var v = document.createElement("span"); v.className = "dim"; v.textContent = Number(m.value).toFixed(2);
+    var del = document.createElement("button"); del.textContent = "\u00d7";
+    del.onclick = function(){ modRemove(i); };
+    row.appendChild(a); row.appendChild(b); row.appendChild(v); row.appendChild(del);
+    host.appendChild(row);
+  });
+}
+
 function tick(){
   fetch("/api/state").then(function(r){ return r.json(); }).then(function(s){
     document.getElementById("status").textContent = s.layer ? ("reteg: " + s.layer) : "kesz";
@@ -94,6 +212,8 @@ function tick(){
       document.getElementById("shaderName").textContent = s.shader || "parameterek";
       buildParams(s.params);
     }
+    if (s.decks) renderDecks(s.decks);
+    if (s.mods) renderMods(s.mods);
   }).catch(function(){ document.getElementById("status").textContent = "nincs kapcsolat"; });
 }
 setInterval(tick, 300); tick();

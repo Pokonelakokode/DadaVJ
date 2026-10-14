@@ -272,6 +272,82 @@ impl App {
                             midi.feed(0, &[0x80, note, 0], now);
                         }
                     }
+                    Command::Launch { deck, clip } => {
+                        if let Some(mixer) = self.mixer.as_mut() {
+                            let q = mixer
+                                .decks
+                                .get(deck)
+                                .map(|d| d.autopilot.quantize)
+                                .unwrap_or(Quantize::Beat);
+                            if let Some(at) = mixer.queue(deck, clip, beat as f64, q) {
+                                log::info!(
+                                    "UI indítás: deck {deck} klip {clip} -> {at:.2} negyed"
+                                );
+                            }
+                        }
+                    }
+                    Command::SetAutopilot {
+                        deck,
+                        mode,
+                        every_beats,
+                    } => {
+                        if let Some(mixer) = self.mixer.as_mut() {
+                            if let Some(d) = mixer.decks.get_mut(deck) {
+                                d.autopilot.mode = match mode.as_str() {
+                                    "sequential" => AutopilotMode::Sequential,
+                                    "shuffle" => AutopilotMode::Shuffle,
+                                    "weighted" => AutopilotMode::Weighted,
+                                    _ => AutopilotMode::Off,
+                                };
+                                d.autopilot.every_beats = every_beats;
+                                d.autopilot.next_change = None;
+                                log::info!(
+                                    "UI autopilot: deck {deck} = {mode} ({every_beats:.0} ütem)"
+                                );
+                            }
+                        }
+                    }
+                    Command::SetDeck {
+                        deck,
+                        opacity,
+                        blend,
+                    } => {
+                        if let Some(mixer) = self.mixer.as_mut() {
+                            if let Some(d) = mixer.decks.get_mut(deck) {
+                                if let Some(o) = opacity {
+                                    d.opacity = o.clamp(0.0, 1.0);
+                                }
+                                if let Some(b) = blend {
+                                    d.blend = match b.as_str() {
+                                        "add" => BlendMode::Add,
+                                        "screen" => BlendMode::Screen,
+                                        "multiply" => BlendMode::Multiply,
+                                        _ => BlendMode::Normal,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    Command::ModAdd {
+                        source,
+                        target,
+                        amount,
+                    } => {
+                        let spec = format!("{source}->{target}:{amount}");
+                        match parse_mod_route(&spec) {
+                            Some(route) => {
+                                self.matrix.add(route);
+                                log::info!("UI mod hozzáadva: {spec}");
+                            }
+                            None => log::warn!("értelmezhetetlen UI mod: {spec}"),
+                        }
+                    }
+                    Command::ModRemove { index } => {
+                        if index < self.matrix.routes.len() {
+                            self.matrix.routes.remove(index);
+                            log::info!("UI mod törölve: #{index}");
+                        }
+                    }
                 }
             }
         }
@@ -465,21 +541,59 @@ impl App {
             } else {
                 "teszt"
             };
-            let active_clips: Vec<Option<usize>> = self
-                .mixer
-                .as_ref()
-                .map(|m| m.decks.iter().map(|d| d.active).collect())
-                .unwrap_or_default();
+            let decks_json: Vec<serde_json::Value> = match self.mixer.as_ref() {
+                Some(mixer) => mixer
+                    .decks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| {
+                        let clips: Vec<serde_json::Value> = d
+                            .clips
+                            .iter()
+                            .map(|c| serde_json::json!({ "name": c.name }))
+                            .collect();
+                        serde_json::json!({
+                            "index": i,
+                            "name": d.name,
+                            "active": d.active,
+                            "queued": d.queued.map(|q| q.clip),
+                            "opacity": d.opacity,
+                            "blend": blend_name(d.blend),
+                            "has_video": self.videos.get(i).map(|v| v.is_some()).unwrap_or(false),
+                            "autopilot": {
+                                "mode": ap_name(d.autopilot.mode),
+                                "every_beats": d.autopilot.every_beats,
+                            },
+                            "clips": clips,
+                        })
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            let mods_json: Vec<serde_json::Value> = self
+                .matrix
+                .routes
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "source": mod_source_name(r.source),
+                        "target": mod_target_name(r.target),
+                        "amount": r.amount,
+                        "value": r.value,
+                        "hits": r.env.triggers,
+                    })
+                })
+                .collect();
             let state = serde_json::json!({
                 "fps": self.last_fps,
-                "decks": self.videos.len(),
-                "active_clips": active_clips,
                 "bpm": bpm,
                 "beats": beats,
                 "midi_messages": midi_msgs,
                 "layer": layer_name,
                 "shader": shader_name,
                 "params": params,
+                "decks": decks_json,
+                "mods": mods_json,
             });
             if let Some(shared) = self.web.as_ref() {
                 shared.set_state(state.to_string());
@@ -518,6 +632,53 @@ impl App {
             );
         }
         println!("{}", "─".repeat(64));
+    }
+}
+
+fn blend_name(b: BlendMode) -> &'static str {
+    match b {
+        BlendMode::Normal => "normal",
+        BlendMode::Add => "add",
+        BlendMode::Multiply => "multiply",
+        BlendMode::Screen => "screen",
+        _ => "normal",
+    }
+}
+
+fn ap_name(m: AutopilotMode) -> &'static str {
+    match m {
+        AutopilotMode::Off => "off",
+        AutopilotMode::Sequential => "sequential",
+        AutopilotMode::Shuffle => "shuffle",
+        AutopilotMode::Weighted => "weighted",
+    }
+}
+
+fn mod_source_name(s: ModSource) -> String {
+    match s {
+        ModSource::Note { note } => format!("note:{note}"),
+        ModSource::Cc { cc } => format!("cc:{cc}"),
+        ModSource::AudioBand(0) => "audio.sub".into(),
+        ModSource::AudioBand(1) => "audio.bass".into(),
+        ModSource::AudioBand(2) => "audio.low_mid".into(),
+        ModSource::AudioBand(3) => "audio.mid".into(),
+        ModSource::AudioBand(4) => "audio.high_mid".into(),
+        ModSource::AudioBand(5) => "audio.high".into(),
+        ModSource::AudioBand(i) => format!("audio.band{i}"),
+        ModSource::AudioRms => "audio.rms".into(),
+        ModSource::AudioOnset => "audio.onset".into(),
+        ModSource::Lfo { period_beats } => format!("lfo:{period_beats}"),
+        ModSource::ClockPhase => "clock.phase".into(),
+    }
+}
+
+fn mod_target_name(t: ModTarget) -> String {
+    match t {
+        ModTarget::DeckOpacity(i) => format!("deck.opacity.{i}"),
+        ModTarget::DeckNextClip(i) => format!("deck.next.{i}"),
+        ModTarget::ShaderParam(i) => format!("shader.param.{i}"),
+        ModTarget::AudioOpacity => "audio.opacity".into(),
+        ModTarget::MasterOpacity => "master.opacity".into(),
     }
 }
 
