@@ -30,9 +30,12 @@
  .deckhead { display:flex; justify-content:space-between; align-items:baseline; }
  .dim { color:var(--dim); }
  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:5px; margin-top:8px; }
- .clip { text-align:left; font-weight:500; font-size:11px; padding:7px 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
- .clip.active { border-color:var(--accent); color:#0b0c10; background:var(--accent); }
- .clip.queued { border-color:var(--accent2); color:var(--accent2); }
+ .clip { position:relative; padding:0; aspect-ratio:16/9; overflow:hidden; background:#0f1116; }
+ .clip img { width:100%; height:100%; object-fit:cover; display:block; opacity:.85; }
+ .clip .lbl { position:absolute; left:0; right:0; bottom:0; font-size:10px; font-weight:600; padding:2px 4px; background:linear-gradient(transparent, rgba(0,0,0,.85)); color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:left; }
+ .clip.active { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent) inset; }
+ .clip.active .lbl { background:var(--accent); color:#0b0c10; }
+ .clip.queued { border-color:var(--accent2); box-shadow:0 0 0 2px var(--accent2) inset; }
  .modrow { display:flex; justify-content:space-between; gap:8px; border-bottom:1px solid var(--line); padding:3px 0; }
  .modrow button { padding:0 7px; }
 </style>
@@ -160,9 +163,17 @@ function renderDecks(decks){
       d.clips.forEach(function(c, ci){
         var t = document.createElement("button");
         t.className = "clip";
-        t.textContent = c.name.length > 20 ? c.name.slice(0, 19) + "\u2026" : c.name;
         t.title = c.name;
         t.onclick = function(){ launch(i, ci); };
+        var img = document.createElement("img");
+        img.loading = "lazy";
+        img.alt = "";
+        img.src = "/thumb?deck=" + i + "&clip=" + ci;
+        t.appendChild(img);
+        var lbl = document.createElement("span");
+        lbl.className = "lbl";
+        lbl.textContent = c.name;
+        t.appendChild(lbl);
         grid.appendChild(t);
       });
       el.appendChild(grid);

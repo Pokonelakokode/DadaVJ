@@ -591,6 +591,7 @@ name = "dada-media"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "jpeg-encoder",
  "log",
  "metal",
  "objc2 0.6.5",

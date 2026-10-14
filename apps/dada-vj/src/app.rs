@@ -1421,6 +1421,7 @@ impl ApplicationHandler for App {
                 }
             }
         }
+        // A klipek útvonalainak átadása a web-szervernek (thumbnailhez).
         if self.args.serve {
             let shared = WebShared::new();
             match web::spawn(self.args.port, Arc::clone(&shared)) {
@@ -1428,6 +1429,21 @@ impl ApplicationHandler for App {
                 Err(e) => log::error!("{e:#}"),
             }
         }
+        if let Some(shared) = self.web.as_ref() {
+            let mut clips: Vec<((usize, usize), String)> = Vec::new();
+            for (i, cfg) in self.deck_configs.iter().enumerate() {
+                let mut names = scan_videos(&PathBuf::from(&cfg.folder));
+                names.sort();
+                for (ci, p) in names.iter().enumerate() {
+                    clips.push(((i, ci), p.display().to_string()));
+                }
+            }
+            if !clips.is_empty() {
+                log::info!("{} klip átadva a UI-nak (thumbnailek)", clips.len());
+                shared.set_clips(clips);
+            }
+        }
+
         if self.args.midi || self.args.serve {
             match MidiEngine::list_ports() {
                 Ok(ports) => {

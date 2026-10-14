@@ -46,6 +46,10 @@ pub struct WebShared {
     jpeg: Mutex<Vec<u8>>,
     state: Mutex<String>,
     commands: Mutex<Vec<Command>>,
+    /// (deck, clip) -> fájlútvonal, a thumbnail-generáláshoz.
+    clips: Mutex<std::collections::HashMap<(usize, usize), String>>,
+    /// Elkészült thumbnailek.
+    thumbs: Mutex<std::collections::HashMap<(usize, usize), Arc<Vec<u8>>>>,
     seq: AtomicU64,
     pub jpegs_sent: AtomicU64,
 }
@@ -56,6 +60,8 @@ impl WebShared {
             jpeg: Mutex::new(Vec::new()),
             state: Mutex::new("{}".to_string()),
             commands: Mutex::new(Vec::new()),
+            clips: Mutex::new(std::collections::HashMap::new()),
+            thumbs: Mutex::new(std::collections::HashMap::new()),
             seq: AtomicU64::new(0),
             jpegs_sent: AtomicU64::new(0),
         })
@@ -85,6 +91,49 @@ impl WebShared {
         if let Ok(mut c) = self.commands.lock() {
             if c.len() < 256 {
                 c.push(cmd);
+            }
+        }
+    }
+
+    /// A klipek útvonalainak beállítása (thumbnailhez).
+    pub fn set_clips(&self, clips: Vec<((usize, usize), String)>) {
+        if let Ok(mut c) = self.clips.lock() {
+            for (k, v) in clips {
+                c.entry(k).or_insert(v);
+            }
+        }
+    }
+
+    /// Egy klip thumbnailje (szükség esetén legenerálva, cache-elve).
+    fn thumbnail(&self, deck: usize, clip: usize) -> Option<Arc<Vec<u8>>> {
+        if let Ok(t) = self.thumbs.lock() {
+            if let Some(v) = t.get(&(deck, clip)) {
+                return Some(Arc::clone(v));
+            }
+        }
+        let path = self.clips.lock().ok()?.get(&(deck, clip)).cloned()?;
+        let t0 = std::time::Instant::now();
+        match dada_media::macos::thumb::video_thumbnail(
+            std::path::Path::new(&path),
+            240,
+            135,
+            75,
+        ) {
+            Ok(bytes) => {
+                log::info!(
+                    "thumbnail: deck {deck} klip {clip} ({} bájt, {:.0} ms)",
+                    bytes.len(),
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
+                let arc = Arc::new(bytes);
+                if let Ok(mut t) = self.thumbs.lock() {
+                    t.insert((deck, clip), Arc::clone(&arc));
+                }
+                Some(arc)
+            }
+            Err(e) => {
+                log::warn!("thumbnail hiba ({path}): {e:#}");
+                None
             }
         }
     }
@@ -129,6 +178,39 @@ fn header(name: &str, value: &str) -> tiny_http::Header {
 fn handle(mut request: tiny_http::Request, shared: &Arc<WebShared>) -> Result<()> {
     let url = request.url().to_string();
     let method = request.method().clone();
+    // /thumb?deck=D&clip=C
+    if method == tiny_http::Method::Get && url.starts_with("/thumb") {
+        let (mut deck, mut clip) = (0usize, 0usize);
+        if let Some((_, q)) = url.split_once('?') {
+            for part in q.split('&') {
+                if let Some((k, v)) = part.split_once('=') {
+                    match k {
+                        "deck" => deck = v.parse().unwrap_or(0),
+                        "clip" => clip = v.parse().unwrap_or(0),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        return match shared.thumbnail(deck, clip) {
+            Some(bytes) => {
+                request
+                    .respond(
+                        tiny_http::Response::from_data(bytes.as_ref().clone())
+                            .with_header(header("Content-Type", "image/jpeg"))
+                            .with_header(header("Cache-Control", "public, max-age=3600")),
+                    )
+                    .map_err(|e| anyhow!("{e}"))
+            }
+            None => request
+                .respond(
+                    tiny_http::Response::from_string("nincs thumbnail")
+                        .with_status_code(404),
+                )
+                .map_err(|e| anyhow!("{e}")),
+        };
+    }
+
     match (method, url.as_str()) {
         (tiny_http::Method::Get, "/") => {
             let html = include_str!("../web/index.html");

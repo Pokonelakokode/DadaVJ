@@ -76,6 +76,8 @@ pub struct Args {
     pub link: bool,
     /// Link-állapot kiírása (headless diagnosztika).
     pub link_status: bool,
+    /// Thumbnail készítése egy videóból (headless ellenőrzés).
+    pub thumb_check: Option<String>,
     /// Az encoder önálló validációja (headless).
     pub encode_check: bool,
     /// Beépített web-szerver (vezérlő UI + MJPEG előnézet).
@@ -119,6 +121,7 @@ impl Default for Args {
             rtmp: None,
             link: false,
             link_status: false,
+            thumb_check: None,
             encode_check: false,
             serve: false,
             port: 7777,
@@ -187,6 +190,7 @@ impl Args {
                 "--rtmp" => args.rtmp = it.next(),
                 "--link" => args.link = true,
                 "--link-status" => args.link_status = true,
+                "--thumb-check" => args.thumb_check = it.next(),
                 "--encode-check" => args.encode_check = true,
                 "--project" => args.project = it.next(),
                 "--save" => args.save = it.next(),
@@ -236,6 +240,27 @@ fn main() -> Result<()> {
     // Egy videófájl vizsgálata.
     if let Some(path) = args.probe.clone() {
         return pollster::block_on(bench::probe(&path));
+    }
+
+    // Thumbnail-ellenőrzés.
+    if let Some(path) = args.thumb_check.clone() {
+        let out = format!("{path}.thumb.jpg");
+        let t0 = std::time::Instant::now();
+        let jpeg = dada_media::macos::thumb::video_thumbnail(
+            std::path::Path::new(&path),
+            320,
+            180,
+            80,
+        )?;
+        std::fs::write(&out, &jpeg)?;
+        println!(
+            "THUMB — {} -> {} ({} bájt, {:.0} ms)",
+            path,
+            out,
+            jpeg.len(),
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
+        return Ok(());
     }
 
     // Link-állapot (headless).

@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+jpeg-encoder = "0.6.1"
 log = "0.4.34"
 objc2 = "0.6.5"
 objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media"] }
