@@ -7,6 +7,7 @@ use crate::video::VideoLayer;
 use crate::Args;
 use dada_audio::AudioEngine;
 use dada_fx::Effect;
+use dada_midi::{EnvelopeSpec, Mapping, MidiEngine, Trigger};
 use std::time::{Duration, SystemTime};
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,6 +24,7 @@ pub struct App {
     video: Option<VideoLayer>,
     audio: Option<(AudioEngine, AudioVisual)>,
     shader: Option<Effect>,
+    midi: Option<MidiEngine>,
     shader_mtime: Option<SystemTime>,
     last_shader_check: Instant,
     stats: FrameStats,
@@ -41,6 +43,7 @@ impl App {
             video: None,
             audio: None,
             shader: None,
+            midi: None,
             shader_mtime: None,
             last_shader_check: Instant::now(),
             stats: FrameStats::new(3600),
@@ -56,8 +59,11 @@ impl App {
         self.last_frame = now;
         let t = now.duration_since(self.started).as_secs_f32();
 
-        // 120 BPM szintetikus beat, amíg a MIDI clock/Link be nem köt.
-        let beat = t * 2.0;
+        // A zenei pozíció: MIDI clock-ból, ha van és be van zárva; különben belső 120 BPM.
+        let beat = match self.midi.as_ref() {
+            Some(engine) if engine.is_locked() => engine.transport.beats_at(t as f64) as f32,
+            _ => t * 2.0,
+        };
 
         let Some(renderer) = self.renderer.as_mut() else {
             return;
@@ -74,6 +80,12 @@ impl App {
             },
             None => None,
         };
+        // MIDI: hardveres byte-ok átvétele, clock, envelope-ok léptetése.
+        if let Some(midi) = self.midi.as_mut() {
+            midi.tick(t as f64, dt_ms as f32 / 1000.0);
+            let _ = midi.take_events();
+        }
+
         // A látható réteg kiválasztása: shader > audio > videó.
         let (w, h) = renderer.size();
         let mut layer: Option<LayerRef> = None;
@@ -99,6 +111,26 @@ impl App {
                 }
             }
             let effect = self.shader.as_mut().unwrap();
+
+            // MIDI moduláció: note -> envelope -> shader paraméter.
+            if let Some(midi) = self.midi.as_ref() {
+                for mapping in &midi.mappings {
+                    let Some(idx) = mapping
+                        .target
+                        .strip_prefix("shader.param.")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    else {
+                        continue;
+                    };
+                    if let Some(p) = effect.shader.params.get(idx) {
+                        let v = mapping.value();
+                        let val = p.default[0] + v * (p.max - p.default[0]);
+                        if idx < effect.values.len() {
+                            effect.values[idx] = [val, p.default[1], p.default[2], p.default[3]];
+                        }
+                    }
+                }
+            }
             effect.update(renderer.queue(), [w as f32, h as f32], t, dt_ms as f32 / 1000.0);
             layer = Some(LayerRef {
                 pipeline: effect.pipeline(),
@@ -255,6 +287,54 @@ impl ApplicationHandler for App {
                 }
                 Err(e) => log::error!("a shader nem tölthető be: {e:#}"),
             }
+        }
+        if self.args.midi {
+            match MidiEngine::list_ports() {
+                Ok(ports) => {
+                    if ports.is_empty() {
+                        log::warn!("nincs elérhető MIDI-bemenet");
+                    } else {
+                        log::info!(
+                            "MIDI-bemenetek: {}",
+                            ports
+                                .iter()
+                                .map(|p| p.name.clone())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                }
+                Err(e) => log::warn!("MIDI-portok listázása sikertelen: {e:#}"),
+            }
+            let mut engine = MidiEngine::new();
+            match engine.open_all() {
+                Ok(names) => log::info!("megnyitva {} MIDI-forrás", names.len()),
+                Err(e) => log::error!("MIDI megnyitás hiba: {e:#}"),
+            }
+            if self.args.midi_visual {
+                // A kick (36) -> az első shader-paraméter, 220 ms lecsengéssel.
+                let spec = EnvelopeSpec {
+                    attack_ms: 0.0,
+                    hold_ms: 0.0,
+                    decay_ms: 220.0,
+                    curve: dada_midi::Curve::Exponential,
+                    retrigger: true,
+                };
+                engine.mappings.push(
+                    Mapping::new(
+                        0,
+                        Trigger::Note {
+                            note: 36,
+                            channel: None,
+                        },
+                        "shader.param.0",
+                        1.0,
+                    )
+                    .with_spec(spec),
+                );
+                log::info!("MIDI-moduláció: note 36 -> shader.param.0 (220 ms lecsengés)");
+            }
+            self.midi = Some(engine);
         }
         self.renderer = Some(renderer);
         self.window = Some(window.clone());

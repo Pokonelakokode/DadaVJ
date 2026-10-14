@@ -16,10 +16,176 @@ use crate::renderer::{LayerRef, Renderer};
 use crate::video::VideoLayer;
 use dada_audio::AudioEngine;
 use dada_fx::{Effect, IsfShader};
+use dada_midi::{
+    mapping::Curve, synthetic_clock, EnvelopeSpec, Mapping, MidiEngine, Trigger,
+};
 use crate::Args;
 use anyhow::{bail, Result};
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+/// Automatikus MIDI-validáció: clock -> BPM, note -> envelope -> shader -> pixel.
+///
+/// Végigmegy a teljes láncon szintetikus MIDI byte-okkal (nincs szükség hardverre):
+/// 24 PPQN clock 128 BPM-en + kick minden negyeden, és ellenőrzi, hogy a
+/// BPM bezár, az envelope felfut és lecseng, a kimenet pedig változik.
+pub async fn midi_check(args: &Args) -> Result<()> {
+    let shader_path = args
+        .shader
+        .clone()
+        .unwrap_or_else(|| "shaders/plasma.isf".to_string());
+    let width = 1280u32;
+    let height = 720u32;
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let mut renderer = Renderer::new_offscreen(width, height, format).await?;
+    let shader = IsfShader::load(Path::new(&shader_path))?;
+    let mut effect = Effect::new(renderer.device(), format, shader)?;
+
+    let bpm = 128.0f64;
+    let seconds = 6.0f64;
+    let mut midi = MidiEngine::new();
+    let spec = EnvelopeSpec {
+        attack_ms: 0.0,
+        hold_ms: 0.0,
+        decay_ms: 220.0,
+        curve: Curve::Exponential,
+        retrigger: true,
+    };
+    midi.mappings.push(
+        Mapping::new(0, Trigger::Note { note: 36, channel: None }, "shader.param.0", 1.0)
+            .with_spec(spec),
+    );
+
+    // Szintetikus stream: clock + kick minden negyeden.
+    let mut stream: Vec<(f64, Vec<u8>)> = synthetic_clock(bpm, seconds, 0.0015);
+    let beat = 60.0 / bpm;
+    let mut b = 0.0;
+    while b < seconds {
+        stream.push((b, vec![0x90, 36, 100]));
+        stream.push((b + 0.03, vec![0x80, 36, 0]));
+        b += beat;
+    }
+    stream.push((0.0, vec![0xFA]));
+    stream.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+
+    println!("MIDI-CHECK — szintetikus clock @ {bpm:.0} BPM + kick minden negyeden");
+    println!("  shader: {shader_path}");
+
+    let frames = (seconds * 60.0) as u32;
+    let mut cursor = 0usize;
+    let mut samples: Vec<(u32, f32, f32, [u8; 3])> = Vec::new();
+    let mut env_peak = 0.0f32;
+    let mut env_min_after_peak = 1.0f32;
+    let mut seen_peak = false;
+
+    for i in 0..frames {
+        let now = i as f64 / 60.0;
+        while cursor < stream.len() && stream[cursor].0 <= now {
+            let (ts, bytes) = &stream[cursor];
+            midi.feed(0, bytes, *ts);
+            cursor += 1;
+        }
+        midi.tick(now, 1.0 / 60.0);
+
+        // Mapping alkalmazása a shader paraméterére.
+        if let Some(m) = midi.mappings.first() {
+            let v = m.value();
+            if let Some(p) = effect.shader.params.first() {
+                effect.set_param(0, [p.default[0] + v * (p.max - p.default[0]), 0.0, 0.0, 0.0]);
+            }
+        }
+        let env_value = midi.mappings.first().map(|m| m.value()).unwrap_or(0.0);
+        env_peak = env_peak.max(env_value);
+        if env_value > 0.5 {
+            seen_peak = true;
+        }
+        if seen_peak && env_value < env_min_after_peak {
+            env_min_after_peak = env_value;
+        }
+
+        let t = now as f32;
+        effect.update(renderer.queue(), [width as f32, height as f32], t, 1.0 / 60.0);
+        renderer.render(
+            t,
+            0.0,
+            1,
+            None,
+            Some(LayerRef {
+                pipeline: effect.pipeline(),
+                bind_group: effect.bind_group(),
+            }),
+        )?;
+
+        if i % 20 == 0 {
+            if let Some(px) = renderer.read_back_center(8, 8) {
+                let mut sum = [0u32; 3];
+                let mut n = 0u32;
+                for chunk in px.chunks_exact(4) {
+                    sum[0] += chunk[2] as u32;
+                    sum[1] += chunk[1] as u32;
+                    sum[2] += chunk[0] as u32;
+                    n += 1;
+                }
+                if n > 0 {
+                    samples.push((
+                        i,
+                        now as f32,
+                        env_value,
+                        [(sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8],
+                    ));
+                }
+            }
+        }
+    }
+    renderer.wait_idle();
+
+    let detected_bpm = midi.bpm();
+    let beats = midi.transport.beats_at(seconds);
+    println!(
+        "  clock tickek: {} · üzenetek: {} · bezárt: {}",
+        midi.clock_ticks,
+        midi.messages_in,
+        midi.is_locked()
+    );
+    println!(
+        "  detektált BPM: {detected_bpm:.2} (várt: {bpm:.0}) · transport: {:.2} negyed {:.2} s alatt",
+        beats, seconds
+    );
+    println!(
+        "  envelope: csúcs {env_peak:.2} · lecsengés után {env_min_after_peak:.2} · kick-ek: {}",
+        midi.mappings[0].hits
+    );
+    println!("  minta (idő, envelope, RGB):");
+    for (i, t, env, c) in &samples {
+        println!(
+            "    frame {i:>3} t={t:>4.2}s env={env:.2}  R={:>3} G={:>3} B={:>3}",
+            c[0], c[1], c[2]
+        );
+    }
+
+    if (detected_bpm as f64 - bpm).abs() > 1.0 {
+        bail!("a clock PLL nem zárt be: {detected_bpm:.2} BPM");
+    }
+    if env_peak < 0.5 {
+        bail!("az envelope nem fut fel: {env_peak:.2}");
+    }
+    if env_min_after_peak > 0.1 {
+        bail!("az envelope nem cseng le: {env_min_after_peak:.2}");
+    }
+    let distinct = {
+        let mut set = std::collections::BTreeSet::new();
+        for (_, _, _, c) in &samples {
+            set.insert(*c);
+        }
+        set.len()
+    };
+    println!("  különböző színminta: {distinct}");
+    if distinct < 2 {
+        bail!("a kimenet nem változik a MIDI hatására");
+    }
+    println!("  OK: MIDI clock -> BPM -> envelope -> shader paraméter -> pixel.");
+    Ok(())
+}
 
 /// Automatikus ISF-validáció: a shader lefordul, lefut, és a kimenet változik?
 pub async fn shader_check(args: &Args) -> Result<()> {

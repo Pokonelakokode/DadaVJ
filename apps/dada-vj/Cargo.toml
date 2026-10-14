@@ -13,6 +13,7 @@ dada-audio.workspace = true
 dada-core.workspace = true
 dada-fx.workspace = true
 dada-media.workspace = true
+dada-midi.workspace = true
 env_logger = "0.11.11"
 log = "0.4.34"
 pollster = "1.0.1"

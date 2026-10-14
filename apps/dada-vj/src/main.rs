@@ -39,6 +39,12 @@ pub struct Args {
     pub shader: Option<String>,
     /// Automatikus shader-validáció (offscreen render + pixel-visszaolvasás).
     pub shader_check: bool,
+    /// MIDI-bemenetek megnyitása.
+    pub midi: bool,
+    /// MIDI note -> envelope -> shader paraméter (a kickre reagáló effekt).
+    pub midi_visual: bool,
+    /// Automatikus MIDI-validáció (szintetikus clock + note stream, headless).
+    pub midi_check: bool,
 }
 
 impl Default for Args {
@@ -58,6 +64,9 @@ impl Default for Args {
             audio_check: false,
             shader: None,
             shader_check: false,
+            midi: false,
+            midi_visual: false,
+            midi_check: false,
         }
     }
 }
@@ -95,11 +104,17 @@ impl Args {
                 "--audio-check" => args.audio_check = true,
                 "--shader" => args.shader = it.next(),
                 "--shader-check" => args.shader_check = true,
+                "--midi" => args.midi = true,
+                "--midi-visual" => {
+                    args.midi = true;
+                    args.midi_visual = true;
+                }
+                "--midi-check" => args.midi_check = true,
                 "--no-vsync" => args.vsync = false,
                 "--fullscreen" => args.fullscreen = true,
                 "-h" | "--help" => {
                     println!(
-                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
+                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --midi              MIDI-bemenetek megnyitása (több forrás egyszerre)\n  --midi-visual       MIDI note -> envelope -> shader paraméter\n  --midi-check        automatikus MIDI-validáció (headless)\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
                         env!("CARGO_PKG_VERSION")
                     );
                     std::process::exit(0);
@@ -114,6 +129,11 @@ impl Args {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse()?;
+
+    // Headless MIDI-validáció.
+    if args.midi_check {
+        return pollster::block_on(bench::midi_check(&args));
+    }
 
     // Headless shader-validáció.
     if args.shader_check {
