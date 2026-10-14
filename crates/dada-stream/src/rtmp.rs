@@ -251,6 +251,11 @@ fn wait_event(
             Ok(0) => bail!("a szerver lezárta a kapcsolatot ({what})"),
             Ok(n) => {
                 let results = session.handle_input(&buf[..n])?;
+                // FONTOS: a batch összes kimenő csomagját el kell küldeni.
+                // A kliens a connect elfogadása UTÁN küldi a SetChunkSize-t,
+                // ezért a korai visszatérés elhagyná (a szerver 128-on maradna,
+                // a kliens 4096-on küldene -> szinkronvesztés).
+                let mut done = false;
                 for r in results {
                     match r {
                         ClientSessionResult::OutboundResponse(packet) => {
@@ -263,11 +268,15 @@ fn wait_event(
                                 bail!("az RTMP kapcsolatot elutasították: {description}");
                             }
                             if pred(&e) {
-                                return Ok(());
+                                done = true;
                             }
                         }
                         _ => {}
                     }
+                }
+                if done {
+                    log::debug!("RTMP: {what} kész, minden válasz elküldve");
+                    return Ok(());
                 }
             }
             Err(e)

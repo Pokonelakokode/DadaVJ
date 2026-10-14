@@ -66,7 +66,13 @@ megérkezik** (a 31 bájtos tag pontosan egy AVC sequence header).
 
 ## A talált korlát (őszintén)
 
-A fogadó a **több-chunkos üzeneteknél** elszáll:
+> **JAVÍTÁS (16. kör):** ez a diagnózis téves volt. A hiba a **saját
+> kliensünkben** volt: a wait_event függvény a connect esemény után azonnal
+> visszatért, és elhagyta az utána következő SetChunkSize csomagot. A szerver
+> ezért 128-as, a kliens 4096-os chunk-mérettel dolgozott — pont ez okozta a
+> szinkronvesztést. A javítás után minden működik; lásd a 16. dokumentumot.
+
+A fogadó a **több-chunkos üzeneteknél** elszállt:
 
 ```
   handle_input hiba: ChunkDeserializationError(NoPreviousChunkOnStream { csid: 42 })

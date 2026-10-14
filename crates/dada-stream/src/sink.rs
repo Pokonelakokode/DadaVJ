@@ -35,6 +35,10 @@ fn write_results(stream: &mut TcpStream, results: Vec<ServerSessionResult>) {
 pub fn serve_one(stream: TcpStream, max_tags: u64) -> Result<SinkStats> {
     let mut stream = stream;
     stream.set_nodelay(true).ok();
+    // Időtúllépés: a teszt ne akadhasson be, ha a kliens elhallgat.
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok();
     let mut stats = SinkStats::default();
     let mut buf = vec![0u8; 65536];
 
@@ -113,7 +117,12 @@ pub fn serve_one(stream: TcpStream, max_tags: u64) -> Result<SinkStats> {
                         if stats.video_tags == 0 {
                             stats.first_tag = data.to_vec();
                         }
-                        if data.len() > 1 && data[1] == 0x01 {
+                        // frame type 1 = keyframe (a felső nibble),
+                        // AVCPacketType 1 = NALU (nem sequence header).
+                        if data.len() > 1
+                            && data[1] == 0x01
+                            && (data[0] & 0xF0) == 0x10
+                        {
                             stats.keyframes += 1;
                         }
                         stats.video_tags += 1;
@@ -138,6 +147,13 @@ pub fn serve_one(stream: TcpStream, max_tags: u64) -> Result<SinkStats> {
                 break;
             }
             Ok(n) => n,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                eprintln!("olvasási időtúllépés ({} tag után)", stats.video_tags);
+                break;
+            }
             Err(e) => {
                 eprintln!("olvasási hiba: {e:?}");
                 break;
