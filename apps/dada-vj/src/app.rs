@@ -254,9 +254,13 @@ impl App {
                             _ => None,
                         });
                     if let (Some((path, name)), Some(device)) = (next, device.as_ref()) {
+                        let switch_start = Instant::now();
                         match VideoLayer::open(device, std::path::Path::new(&path), 1.0) {
                             Ok(video) => {
-                                log::info!("deck {deck} váltás -> {name} (beat {at_beat:.2})");
+                                log::info!(
+                                    "deck {deck} váltás -> {name} (beat {at_beat:.2}) [{:.1} ms]",
+                                    switch_start.elapsed().as_secs_f64() * 1000.0
+                                );
                                 if deck < self.videos.len() {
                                     self.videos[deck] = Some(video);
                                 }

@@ -78,7 +78,7 @@ CPU ~18–22%, RSS 93 MB.
 
 | Hiányzik | Terv |
 |---|---|
-| Klipváltásnál új dekóder indul (~100 ms) | Phase 2: előre-töltés a háttérben |
+| Klipváltásnál új dekóder indul | **MÉRVE: 4-12 ms** (20. kör), elhanyagolható; az eredeti ~100 ms becslés téves volt |
 | Lighten/Difference blend | Phase 2: kompozitáló pass |
 
 ## Reprodukálás
