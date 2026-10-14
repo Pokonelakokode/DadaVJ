@@ -124,6 +124,8 @@ pub struct IsfShader {
     pub path: PathBuf,
     pub metadata: Metadata,
     pub params: Vec<Param>,
+    /// Képi bemenetek nevei (TYPE: image).
+    pub images: Vec<String>,
     pub uniform_size: u64,
     pub wgsl_fragment: String,
     pub skipped: Vec<String>,
@@ -139,12 +141,19 @@ impl IsfShader {
     pub fn from_source(source: &str, path: PathBuf) -> Result<Self> {
         let (metadata, body) = split_header(source)?;
         let (params, skipped) = build_params(&metadata)?;
+        let images: Vec<String> = metadata
+            .inputs
+            .iter()
+            .filter(|i| i.kind == "image")
+            .map(|i| i.name.clone())
+            .collect();
         let uniform_size = uniform_layout_size(&params);
-        let wgsl_fragment = translate(&body, &params)?;
+        let wgsl_fragment = translate(&body, &params, &images)?;
         Ok(Self {
             path,
             metadata,
             params,
+            images,
             uniform_size,
             wgsl_fragment,
             skipped,
@@ -275,7 +284,7 @@ fn is_ident_byte(b: u8) -> bool {
 }
 
 /// Az ISF shader-törzs fordítása WGSL-re a naga segítségével.
-pub fn translate(body: &str, params: &[Param]) -> Result<String> {
+pub fn translate(body: &str, params: &[Param], images: &[String]) -> Result<String> {
     let mut block = String::from("layout(std140, set = 0, binding = 0) uniform ISFParams {\n");
     block.push_str("    vec4 _isf_render;\n    vec4 _isf_frame;\n");
     for p in params {
@@ -294,8 +303,20 @@ pub fn translate(body: &str, params: &[Param]) -> Result<String> {
     body = replace_word(&body, "isf_FragCoord", "_isf_render.xy * isf_FragNormCoord");
     body = replace_word(&body, "texture2D", "texture");
 
+    // Képi bemenetek: a naga nem támogatja a standalone samplert, ezért
+    // stub-függvénnyé alakítjuk, és a generált WGSL-ben cseréljük valódi
+    // textúra-mintavételre.
+    let mut stubs = String::new();
+    for (i, img) in images.iter().enumerate() {
+        body = remove_sampler_declaration(&body, img);
+        body = rewrite_texture_call(&body, img, &format!("isf_image_{i}"));
+        stubs.push_str(&format!(
+            "vec4 isf_image_{i}(vec2 isf_uv) {{ return vec4(0.0, 0.0, 0.0, 1.0); }}\n"
+        ));
+    }
+
     let full = format!(
-        "#version 450\nlayout(location = 0) in vec2 isf_FragNormCoord;\nlayout(location = 0) out vec4 isf_FragColor;\n{block}\n{body}\n"
+        "#version 450\nlayout(location = 0) in vec2 isf_FragNormCoord;\nlayout(location = 0) out vec4 isf_FragColor;\n{block}\n{stubs}\n{body}\n"
     );
 
     let mut frontend = naga::front::glsl::Frontend::default();
@@ -316,8 +337,29 @@ pub fn translate(body: &str, params: &[Param]) -> Result<String> {
     if !module.entry_points.iter().any(|e| e.name == "main") {
         bail!("nincs main() a shaderben");
     }
-    let wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
+    let mut wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
         .map_err(|e| anyhow!("WGSL kiírás: {e:?}"))?;
+
+    // A stub-ok cseréje igazi mintavételre, és a bindingek beillesztése.
+    // A paraméterek a 0-ás bindingen vannak, a képek 1/2, 3/4, ... párokat kapnak.
+    let mut globals = String::new();
+    for i in 0..images.len() {
+        let tex = 1 + i * 2;
+        let samp = 2 + i * 2;
+        globals.push_str(&format!(
+            "@group(0) @binding({tex}) var isf_tex_{i}: texture_2d<f32>;\n@group(0) @binding({samp}) var isf_samp_{i}: sampler;\n"
+        ));
+        wgsl = replace_wgsl_function_named(
+            &wgsl,
+            &format!("isf_image_{i}"),
+            &format!(
+                "fn {{name}}(isf_uv: vec2<f32>) -> vec4<f32> {{\n    return textureSample(isf_tex_{i}, isf_samp_{i}, isf_uv);\n}}\n"
+            ),
+        );
+    }
+    if !globals.is_empty() {
+        wgsl = format!("{globals}{wgsl}");
+    }
     Ok(inject_layer_opacity(&wgsl))
 }
 
@@ -346,9 +388,125 @@ fn inject_layer_opacity(wgsl: &str) -> String {
     out
 }
 
+/// A sampler-deklaráció eltávolítása (a naga nem támogatja a standalone samplert).
+fn remove_sampler_declaration(body: &str, name: &str) -> String {
+    let suffix = format!("{name};");
+    body.lines()
+        .filter(|line| {
+            let t = line.trim();
+            !(t.contains("sampler2D") && t.ends_with(&suffix))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// texture(name, uv) -> fuggveny(uv)
+fn rewrite_texture_call(body: &str, name: &str, func: &str) -> String {
+    let call = format!("{func}(");
+    body.replace(&format!("texture({name},"), &call)
+        .replace(&format!("texture({name} ,"), &call)
+        .replace(&format!("texture( {name},"), &call)
+}
+
+/// Egy WGSL-függvény lecserélése a neve alapján (kapcsos zárójel-számlálással).
+/// A függvény lecserélése; a tényleges (esetleg átnevezett) nevet is kezeli.
+/// A `replacement` egy format-sablon, ahol {name} a tényleges név.
+fn replace_wgsl_function_named(wgsl: &str, name: &str, replacement: &str) -> String {
+    let needle = format!("fn {name}");
+    let Some(start) = wgsl.find(&needle) else {
+        return wgsl.to_string();
+    };
+    // A tényleges név: a 'fn ' után a '(' -ig.
+    let name_start = start + 3;
+    let Some(paren_rel) = wgsl[name_start..].find('(') else {
+        return wgsl.to_string();
+    };
+    let actual = wgsl[name_start..name_start + paren_rel].trim();
+    let Some(open_rel) = wgsl[start..].find('{') else {
+        return wgsl.to_string();
+    };
+    let open = start + open_rel;
+    let bytes = wgsl.as_bytes();
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, b) in bytes.iter().enumerate().skip(open) {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        return wgsl.to_string();
+    };
+    let body = replacement.replace("{name}", actual);
+    format!("{}{}{}", &wgsl[..start], body, &wgsl[end..])
+}
+
+/// Az ISF kép-bemenetek száma (a bind group építéséhez).
+pub fn image_bindings(images: &[String]) -> Vec<(String, u32, u32)> {
+    images
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.clone(), 1 + i as u32 * 2, 2 + i as u32 * 2))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn image_inputs_translate_to_texture_sampling() {
+        let src = r#"/*{
+  "INPUTS": [
+    { "NAME": "inputImage", "TYPE": "image" },
+    { "NAME": "amount", "TYPE": "float", "DEFAULT": 0.5 }
+  ]
+}*/
+void main() {
+    vec4 base = texture2D(inputImage, isf_FragNormCoord);
+    gl_FragColor = mix(base, vec4(1.0), amount);
+}
+"#;
+        let shader = IsfShader::from_source(src, PathBuf::from("teszt.fs")).expect("fordítás");
+        assert_eq!(shader.images, vec!["inputImage".to_string()]);
+        let w = &shader.wgsl_fragment;
+        assert!(
+            w.contains("textureSample(isf_tex_0, isf_samp_0"),
+            "nincs mintavétel:\n{w}"
+        );
+        assert!(
+            w.contains("@group(0) @binding(1) var isf_tex_0: texture_2d<f32>;"),
+            "nincs textúra-binding:\n{w}"
+        );
+        assert!(
+            w.contains("@group(0) @binding(2) var isf_samp_0: sampler;"),
+            "nincs sampler-binding:\n{w}"
+        );
+        assert!(!w.contains("sampler2D"), "maradt sampler2D:\n{w}");
+    }
+
+    #[test]
+    fn image_without_sampler_declaration_still_works() {
+        // Néhány ISF shader csak a fejlécben jelzi a képet.
+        let src = r#"/*{
+  "INPUTS": [ { "NAME": "inputImage", "TYPE": "image" } ]
+}*/
+void main() {
+    gl_FragColor = texture2D(inputImage, isf_FragNormCoord);
+}
+"#;
+        let shader = IsfShader::from_source(src, PathBuf::from("teszt2.fs")).expect("fordítás");
+        assert_eq!(shader.images.len(), 1);
+        assert!(shader.wgsl_fragment.contains("textureSample(isf_tex_0"));
+    }
+
 
     const GRADIENT: &str = r#"/*{
   "DESCRIPTION": "Teszt gradiens",

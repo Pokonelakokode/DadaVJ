@@ -560,6 +560,13 @@ impl App {
                     }
                 }
             }
+            // ISF képi bemenet: a lentebbi rétegek (videó/audio) a bemenete.
+            if effect.has_inputs() {
+                let below = layers.clone();
+                if let Some(view) = renderer.render_input(t, beat, &below) {
+                    effect.set_input(renderer.device(), &view);
+                }
+            }
             effect.opacity =
                 shader_opacity * master_scale(self.mod_master_active, self.mod_master);
             effect.update(renderer.queue(), [w as f32, h as f32], t, dt_ms as f32 / 1000.0);

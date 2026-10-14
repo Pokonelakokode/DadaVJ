@@ -84,6 +84,8 @@ pub struct Renderer {
     video_pipelines: [wgpu::RenderPipeline; 4],
     video_params: wgpu::Buffer,
     preview: Option<PreviewTarget>,
+    /// A "lentebbi rétegek" célpontja: az ISF effekt képi bemenete.
+    input_target: Option<InputTarget>,
 }
 
 impl Renderer {
@@ -178,6 +180,7 @@ impl Renderer {
             video_pipelines,
             video_params,
             preview: None,
+            input_target: None,
         })
     }
 
@@ -261,11 +264,63 @@ impl Renderer {
             video_pipelines,
             video_params,
             preview: None,
+            input_target: None,
         })
     }
 
     pub fn adapter_name(&self) -> &str {
         &self.adapter_name
+    }
+
+    /// A rétegek renderelése egy offscreen céltárgyba, és a nézet visszaadása.
+    ///
+    /// Ezt használja az ISF effekt: a "lentebbi" rétegek lesznek a képi bemenete.
+    pub fn render_input(
+        &mut self,
+        time: f32,
+        beat: f32,
+        layers: &[LayerRef],
+    ) -> Option<wgpu::TextureView> {
+        let size = self.size();
+        if size.0 == 0 || size.1 == 0 {
+            return None;
+        }
+        let needs_new = match &self.input_target {
+            Some(t) => t.size != size,
+            None => true,
+        };
+        if needs_new {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("input-target"),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.input_target = Some(InputTarget {
+                _texture: texture,
+                view,
+                size,
+            });
+        }
+        let view = self.input_target.as_ref()?.view.clone();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("input-encoder"),
+            });
+        self.draw(&mut encoder, &view, size, time, beat, layers);
+        self.queue.submit(Some(encoder.finish()));
+        Some(view)
     }
 
     pub fn format(&self) -> wgpu::TextureFormat {
@@ -729,6 +784,13 @@ fn create_timers(device: &wgpu::Device, features: wgpu::Features) -> Option<Time
 }
 
 /// Előnézet-cél: kicsinyített, CPU-ra visszaolvasható textúra.
+/// Offscreen célpont az ISF effekt képi bemenetéhez.
+struct InputTarget {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+}
+
 struct PreviewTarget {
     texture: wgpu::Texture,
     view: wgpu::TextureView,

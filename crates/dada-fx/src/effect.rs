@@ -33,6 +33,12 @@ fn vs_main(@builtin(vertex_index) vi : u32) -> VOut {
 pub struct Effect {
     pipelines: [wgpu::RenderPipeline; 4],
     bind_group: wgpu::BindGroup,
+    bgl: wgpu::BindGroupLayout,
+    /// Képi bemenetek (binding 1/2, 3/4, ...): a saját sampler + a nézet.
+    image_sampler: wgpu::Sampler,
+    image_views: Vec<wgpu::TextureView>,
+    /// Az 1x1-es tartalék textúra (ha nincs bekötött bemenet).
+    _dummy: Option<wgpu::Texture>,
     uniform_buffer: wgpu::Buffer,
     pub shader: IsfShader,
     pub values: Vec<[f32; 4]>,
@@ -57,33 +63,57 @@ impl Effect {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("effect-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+        let bgl = build_bgl(device, shader.images.len());
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("effect-image-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // Ha a shader kér képet, kell egy tartalék (1x1 fekete), különben a
+        // bind group nem hozható létre a bemenet bekötése előtt.
+        let mut dummy = None;
+        let mut image_views = Vec::new();
+        for _ in 0..shader.images.len() {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("effect-dummy-input"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
                 },
-                count: None,
-            }],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("effect-bg"),
-            layout: &bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            image_views.push(tex.create_view(&wgpu::TextureViewDescriptor::default()));
+            dummy = Some(tex);
+        }
+
+        let bind_group = build_bg(
+            device,
+            &bgl,
+            &uniform_buffer,
+            &image_views,
+            &image_sampler,
+        );
 
         let pipelines = build_pipelines(device, format, &shader.wgsl_fragment, &bgl)?;
 
         Ok(Self {
             pipelines,
             bind_group,
+            bgl,
+            image_sampler,
+            image_views,
+            _dummy: dummy,
             uniform_buffer,
             shader,
             values,
@@ -130,6 +160,26 @@ impl Effect {
         &self.pipelines[blend_index(mode)]
     }
 
+    /// Képi bemenet bekötése (az ISF inputImage). A bind group újraépül.
+    pub fn set_input(&mut self, device: &wgpu::Device, view: &wgpu::TextureView) {
+        if self.shader.images.is_empty() {
+            return;
+        }
+        self.image_views = vec![view.clone(); self.shader.images.len()];
+        self.bind_group = build_bg(
+            device,
+            &self.bgl,
+            &self.uniform_buffer,
+            &self.image_views,
+            &self.image_sampler,
+        );
+    }
+
+    /// Vannak-e képi bemenetei a shadernek.
+    pub fn has_inputs(&self) -> bool {
+        !self.shader.images.is_empty()
+    }
+
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
     }
@@ -163,6 +213,70 @@ impl Effect {
 }
 
 /// A négy blend módhoz négy pipeline (a blend a pipeline állapota).
+/// A bind group layout: 0 = uniform, 1/2 = 1. kép, 3/4 = 2. kép, ...
+fn build_bgl(device: &wgpu::Device, image_count: usize) -> wgpu::BindGroupLayout {
+    let mut entries = vec![wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }];
+    for i in 0..image_count {
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 1 + i as u32 * 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 2 + i as u32 * 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
+    }
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("effect-bgl"),
+        entries: &entries,
+    })
+}
+
+fn build_bg(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    views: &[wgpu::TextureView],
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    let mut entries = vec![wgpu::BindGroupEntry {
+        binding: 0,
+        resource: uniform.as_entire_binding(),
+    }];
+    for (i, view) in views.iter().enumerate() {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 1 + i as u32 * 2,
+            resource: wgpu::BindingResource::TextureView(view),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 2 + i as u32 * 2,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        });
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("effect-bg"),
+        layout: bgl,
+        entries: &entries,
+    })
+}
+
 fn build_pipelines(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
