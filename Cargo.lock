@@ -577,6 +577,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dada-link"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "link-bpm-rs",
+ "log",
+]
+
+[[package]]
 name = "dada-media"
 version = "0.1.0"
 dependencies = [
@@ -623,6 +633,7 @@ dependencies = [
  "dada-audio",
  "dada-core",
  "dada-fx",
+ "dada-link",
  "dada-media",
  "dada-midi",
  "dada-stream",
@@ -1275,6 +1286,17 @@ dependencies = [
  "libc",
  "plain",
  "redox_syscall 0.9.4",
+]
+
+[[package]]
+name = "link-bpm-rs"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f99ab0709270dce39ecf3b35deae2a13ddc0446ce294c05af9ca02ee2735626a"
+dependencies = [
+ "libc",
+ "log",
+ "socket2",
 ]
 
 [[package]]
@@ -2553,6 +2575,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "socket2"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

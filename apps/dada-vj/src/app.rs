@@ -36,6 +36,8 @@ pub struct App {
     matrix: ModMatrix,
     /// A betöltött projekt és a deck-konfigurációk (mentéshez és felépítéshez).
     project: crate::project::Project,
+    /// Ableton Link figyelő (ha be van kapcsolva).
+    link: Option<dada_link::LinkListener>,
     /// Felvétel: AVAssetWriter + a pixel bufferek Metal-csomagolója.
     recorder: Option<dada_media::macos::writer::VideoWriter>,
     /// RTMP stream: hardveres encoder + publikáló.
@@ -99,6 +101,7 @@ impl App {
         Self {
             args,
             project,
+            link: None,
             deck_configs,
             recorder: None,
             encoder: None,
@@ -202,19 +205,34 @@ impl App {
         self.last_frame = now;
         let t = now.duration_since(self.started).as_secs_f32();
 
-        // A zenei pozíció: MIDI clock-ból, ha van és be van zárva; különben belső 120 BPM.
-        let beat = match self.midi.as_ref() {
-            Some(engine) if engine.is_locked() => engine.transport.beats_at(t as f64) as f32,
-            _ => t * 2.0,
+        // A zenei pozíció: Ableton Link > MIDI clock > belső 120 BPM.
+        let link_now = self
+            .link
+            .as_ref()
+            .and_then(|l| l.timeline())
+            .map(|tl| (tl, dada_link::now_link_us()));
+        let link_ok = link_now.map(|(tl, us)| tl.plausible_at(us)).unwrap_or(false);
+        let beat = match (link_now, link_ok) {
+            (Some((tl, us)), true) => tl.beat_at(us) as f32,
+            _ => match self.midi.as_ref() {
+                Some(engine) if engine.is_locked() => {
+                    engine.transport.beats_at(t as f64) as f32
+                }
+                _ => t * 2.0,
+            },
+        };
+        let clock_bpm: f64 = match (link_now, link_ok) {
+            (Some((tl, _)), true) => tl.bpm(),
+            _ => match self.midi.as_ref() {
+                Some(engine) if engine.is_locked() => engine.bpm() as f64,
+                _ => 120.0,
+            },
         };
 
         // Deck/autopilot: kvantált clip-váltás (még a videó-réteg előtt).
         if self.mixer.is_some() {
             let device = self.renderer.as_ref().map(|r| r.device().clone());
-            let bpm = match self.midi.as_ref() {
-                Some(engine) if engine.is_locked() => engine.bpm() as f64,
-                _ => 120.0,
-            };
+            let bpm = clock_bpm;
             let dt_beats = (dt_ms / 1000.0) * bpm / 60.0;
             let events = self
                 .mixer
@@ -297,10 +315,7 @@ impl App {
         }
         if !self.matrix.routes.is_empty() {
             let st = &self.audio_snapshot.state;
-            let bpm = match self.midi.as_ref() {
-                Some(e) if e.is_locked() => e.bpm() as f64,
-                _ => 120.0,
-            };
+            let bpm = clock_bpm;
             let inputs = ModInputs {
                 bands: [
                     st.bands[0], st.bands[1], st.bands[2], st.bands[3], st.bands[4], st.bands[5],
@@ -837,6 +852,8 @@ impl App {
                 "layer": layer_name,
                 "shader": shader_name,
                 "params": params,
+                "link": self.link.as_ref().map(|l| l.is_active()).unwrap_or(false),
+                "link_packets": self.link.as_ref().map(|l| l.packets()).unwrap_or(0),
                 "decks": decks_json,
                 "mods": mods_json,
             });
@@ -1153,6 +1170,20 @@ impl ApplicationHandler for App {
         log::info!("ablak létrehozva: {:?}", window.inner_size());
         let renderer = pollster::block_on(Renderer::new_surface(window.clone(), self.args.vsync))
             .expect("nem sikerült a renderert inicializálni");
+        // Ableton Link figyelő.
+        if self.args.link {
+            match dada_link::LinkListener::new() {
+                Ok(l) => {
+                    log::info!(
+                        "Ableton Link figyelő elindult ({} port) — a tempó és a beat a Link-ből jön, ha van peer",
+                        dada_link::LINK_PORT
+                    );
+                    self.link = Some(l);
+                }
+                Err(e) => log::error!("a Link figyelő nem indítható: {e:#}"),
+            }
+        }
+
         // Modulációs mátrix felépítése.
         for spec in &self.args.mods {
             match parse_mod_route(spec) {
