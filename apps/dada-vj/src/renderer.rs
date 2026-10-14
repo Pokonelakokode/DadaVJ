@@ -284,7 +284,7 @@ impl Renderer {
         beat: f32,
         layers: u32,
         video: Option<&wgpu::TextureView>,
-        audio: Option<AudioLayerRef<'_>>,
+        audio: Option<LayerRef<'_>>,
     ) -> Result<(), wgpu::SurfaceError> {
         match &self.target {
             Target::Surface { surface, config } => {
@@ -378,7 +378,7 @@ impl Renderer {
         beat: f32,
         layers: u32,
         video: Option<&wgpu::TextureView>,
-        audio: Option<AudioLayerRef<'_>>,
+        audio: Option<LayerRef<'_>>,
     ) {
         let uniforms = Uniforms {
             resolution: [size.0 as f32, size.1 as f32],
@@ -550,8 +550,10 @@ fn create_timers(device: &wgpu::Device, features: wgpu::Features) -> Option<Time
     })
 }
 
-/// Egy audio-réteg referenciája (a pipeline és a bind group a hívóé).
-pub struct AudioLayerRef<'a> {
+/// Egy egyedi réteg referenciája (a pipeline és a bind group a hívóé).
+///
+/// Ugyanezt használja az audio-vizuál és az ISF shader-réteg is.
+pub struct LayerRef<'a> {
     pub pipeline: &'a wgpu::RenderPipeline,
     pub bind_group: &'a wgpu::BindGroup,
 }

@@ -12,13 +12,112 @@
 //! diagnosztika: a mérvadó szám a batch-különbség.
 
 use crate::audio_vis::AudioVisual;
-use crate::renderer::{AudioLayerRef, Renderer};
+use crate::renderer::{LayerRef, Renderer};
 use crate::video::VideoLayer;
 use dada_audio::AudioEngine;
+use dada_fx::{Effect, IsfShader};
 use crate::Args;
 use anyhow::{bail, Result};
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+/// Automatikus ISF-validáció: a shader lefordul, lefut, és a kimenet változik?
+pub async fn shader_check(args: &Args) -> Result<()> {
+    let Some(path) = args.shader.clone() else {
+        bail!("a --shader-check-hez kell --shader FAJL.isf");
+    };
+    let width = 1280u32;
+    let height = 720u32;
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let mut renderer = Renderer::new_offscreen(width, height, format).await?;
+
+    let shader = IsfShader::load(Path::new(&path))?;
+    println!("SHADER-CHECK — {path}");
+    println!("  leírás: {}", shader.metadata.description);
+    println!(
+        "  paraméterek: {} · uniform puffer: {} bájt",
+        shader.params.len(),
+        shader.uniform_size
+    );
+    for p in &shader.params {
+        println!(
+            "    {:>12}  {:?}  offset={}  default={:?}",
+            p.name, p.kind, p.offset, p.default
+        );
+    }
+    if !shader.skipped.is_empty() {
+        println!("  kihagyott inputok (nem támogatott típus): {}", shader.skipped.join(", "));
+    }
+
+    let mut effect = Effect::new(renderer.device(), format, shader)?;
+    let mut samples: Vec<(u32, [u8; 3])> = Vec::new();
+    let frames = 180u32;
+    for i in 0..frames {
+        let t = i as f32 / 60.0;
+        // Az első paramétert időben változtatjuk, hogy a uniform-feltöltés is bizonyítva legyen.
+        if !effect.values.is_empty() {
+            let (lo, hi) = (effect.shader.params[0].min, effect.shader.params[0].max);
+            let v = lo + (hi - lo) * (0.5 + 0.5 * (t * 2.0).sin());
+            effect.set_param(0, [v, 0.0, 0.0, 0.0]);
+        }
+        effect.update(renderer.queue(), [width as f32, height as f32], t, 1.0 / 60.0);
+        renderer.render(
+            t,
+            0.0,
+            1,
+            None,
+            Some(LayerRef {
+                pipeline: effect.pipeline(),
+                bind_group: effect.bind_group(),
+            }),
+        )?;
+        if i % 20 == 0 {
+            if let Some(px) = renderer.read_back_center(8, 8) {
+                let mut sum = [0u32; 3];
+                let mut n = 0u32;
+                for chunk in px.chunks_exact(4) {
+                    sum[0] += chunk[2] as u32;
+                    sum[1] += chunk[1] as u32;
+                    sum[2] += chunk[0] as u32;
+                    n += 1;
+                }
+                if n > 0 {
+                    samples.push((
+                        i,
+                        [(sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8],
+                    ));
+                }
+            }
+        }
+    }
+    renderer.wait_idle();
+
+    println!("  kimeneti pixel-minták (RGB, közép):");
+    for (i, c) in &samples {
+        println!("    frame {i:>3}: R={:>3} G={:>3} B={:>3}", c[0], c[1], c[2]);
+    }
+    let distinct = {
+        let mut set = std::collections::BTreeSet::new();
+        for (_, c) in &samples {
+            set.insert(*c);
+        }
+        set.len()
+    };
+    let maxv = samples
+        .iter()
+        .map(|(_, c)| c[0].max(c[1]).max(c[2]))
+        .max()
+        .unwrap_or(0);
+    println!("  különböző színminta: {distinct} · legfényesebb: {maxv}");
+    if maxv < 8 {
+        bail!("a kimenet gyakorlatilag fekete — a shader nem ír");
+    }
+    if distinct < 2 {
+        bail!("a kimenet nem változik — a shader vagy az uniform nem él");
+    }
+    println!("  OK: az ISF shader lefordult, lefutott, és a kimenet változik.");
+    Ok(())
+}
 
 /// Automatikus audio-validáció: a szintetikus jel átjut-e az FFT-n és a shaderen?
 pub async fn audio_check(_args: &Args) -> Result<()> {
@@ -54,7 +153,7 @@ pub async fn audio_check(_args: &Args) -> Result<()> {
             0.0,
             1,
             None,
-            Some(AudioLayerRef {
+            Some(LayerRef {
                 pipeline: vis.pipeline(),
                 bind_group: vis.bind_group(),
             }),

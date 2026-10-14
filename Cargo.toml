@@ -11,6 +11,7 @@ authors = ["Krisztián Gyurkó"]
 
 [workspace.dependencies]
 dada-audio = { path = "crates/dada-audio" }
+dada-fx = { path = "crates/dada-fx" }
 dada-core = { path = "crates/dada-core" }
 dada-media = { path = "crates/dada-media" }
 

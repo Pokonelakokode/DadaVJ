@@ -2,10 +2,12 @@
 
 use crate::audio_vis::AudioVisual;
 use crate::hud::FrameStats;
-use crate::renderer::{AudioLayerRef, Renderer};
+use crate::renderer::{LayerRef, Renderer};
 use crate::video::VideoLayer;
 use crate::Args;
 use dada_audio::AudioEngine;
+use dada_fx::Effect;
+use std::time::{Duration, SystemTime};
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
@@ -20,6 +22,9 @@ pub struct App {
     renderer: Option<Renderer>,
     video: Option<VideoLayer>,
     audio: Option<(AudioEngine, AudioVisual)>,
+    shader: Option<Effect>,
+    shader_mtime: Option<SystemTime>,
+    last_shader_check: Instant,
     stats: FrameStats,
     started: Instant,
     last_frame: Instant,
@@ -35,6 +40,9 @@ impl App {
             renderer: None,
             video: None,
             audio: None,
+            shader: None,
+            shader_mtime: None,
+            last_shader_check: Instant::now(),
             stats: FrameStats::new(3600),
             started: now,
             last_frame: now,
@@ -66,21 +74,46 @@ impl App {
             },
             None => None,
         };
-        // Audio-elemzés + GPU-textúrák frissítése.
-        let audio_layer = match self.audio.as_mut() {
-            Some((engine, vis)) => {
-                let snapshot = engine.process();
-                let (w, h) = renderer.size();
-                vis.update(renderer.queue(), &snapshot, t, w, h);
-                Some(AudioLayerRef {
-                    pipeline: vis.pipeline(),
-                    bind_group: vis.bind_group(),
-                })
+        // A látható réteg kiválasztása: shader > audio > videó.
+        let (w, h) = renderer.size();
+        let mut layer: Option<LayerRef> = None;
+        if self.shader.is_some() {
+            // Hot-reload: ha a fájl megváltozott, újrafordítjuk.
+            if self.last_shader_check.elapsed() > Duration::from_millis(800) {
+                self.last_shader_check = Instant::now();
+                let mtime = self
+                    .shader
+                    .as_ref()
+                    .and_then(|e| std::fs::metadata(&e.shader.path).ok())
+                    .and_then(|m| m.modified().ok());
+                if mtime.is_some() && mtime != self.shader_mtime {
+                    let effect = self.shader.as_mut().unwrap();
+                    let path = effect.shader.path.clone();
+                    match effect.reload(&device) {
+                        Ok(()) => {
+                            log::info!("shader újratöltve: {}", path.display());
+                            self.shader_mtime = mtime;
+                        }
+                        Err(e) => log::error!("shader újratöltés hiba: {e:#}"),
+                    }
+                }
             }
-            None => None,
-        };
+            let effect = self.shader.as_mut().unwrap();
+            effect.update(renderer.queue(), [w as f32, h as f32], t, dt_ms as f32 / 1000.0);
+            layer = Some(LayerRef {
+                pipeline: effect.pipeline(),
+                bind_group: effect.bind_group(),
+            });
+        } else if let Some((engine, vis)) = self.audio.as_mut() {
+            let snapshot = engine.process();
+            vis.update(renderer.queue(), &snapshot, t, w, h);
+            layer = Some(LayerRef {
+                pipeline: vis.pipeline(),
+                bind_group: vis.bind_group(),
+            });
+        }
         if let Some(window) = self.window.as_ref() {
-            match renderer.render(t, beat, self.args.layers, video_view, audio_layer) {
+            match renderer.render(t, beat, self.args.layers, video_view, layer) {
                 Ok(()) => {
                     // Csak a vsync-hez igazított, tényleges frame-eket mérjük.
                     self.stats.push(dt_ms as f32);
@@ -197,6 +230,31 @@ impl ApplicationHandler for App {
                 engine.sample_rate()
             );
             self.audio = Some((engine, vis));
+        }
+        if let Some(path) = self.args.shader.clone() {
+            match dada_fx::IsfShader::load(std::path::Path::new(&path)) {
+                Ok(shader) => {
+                    log::info!(
+                        "ISF shader: {} — {} ({} paraméter{})",
+                        path,
+                        shader.metadata.description,
+                        shader.params.len(),
+                        if shader.skipped.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", kihagyva: {}", shader.skipped.join(", "))
+                        }
+                    );
+                    match Effect::new(renderer.device(), renderer.format(), shader) {
+                        Ok(effect) => {
+                            self.shader_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                            self.shader = Some(effect);
+                        }
+                        Err(e) => log::error!("a shader pipeline nem építhető: {e:#}"),
+                    }
+                }
+                Err(e) => log::error!("a shader nem tölthető be: {e:#}"),
+            }
         }
         self.renderer = Some(renderer);
         self.window = Some(window.clone());

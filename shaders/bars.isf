@@ -1,0 +1,24 @@
+/*{
+  "DESCRIPTION": "Dada savok",
+  "CREDIT": "Dada VJ",
+  "ISFVSN": "2",
+  "CATEGORIES": ["Generator"],
+  "INPUTS": [
+    { "NAME": "count", "TYPE": "float", "DEFAULT": 24.0, "MIN": 3.0, "MAX": 64.0 },
+    { "NAME": "spin", "TYPE": "float", "DEFAULT": 0.35, "MIN": 0.0, "MAX": 3.0 },
+    { "NAME": "center", "TYPE": "point2D", "DEFAULT": [0.5, 0.5] },
+    { "NAME": "hue", "TYPE": "color", "DEFAULT": [0.35, 0.85, 1.0, 1.0] }
+  ]
+}*/
+void main() {
+    vec2 uv = isf_FragNormCoord - center;
+    float a = atan(uv.y, uv.x) + TIME * spin;
+    float r = length(uv);
+    float bars = step(0.5, fract(a / 3.14159265 * count * 0.5));
+    float rings = step(0.75, fract(r * 9.0 - TIME * 0.8));
+    float glow = smoothstep(0.65, 0.0, r);
+    vec3 c = hue.rgb * (bars * 0.8 + rings * 0.5) * glow;
+    c += vec3(0.02, 0.03, 0.07);
+    gl_FragColor = vec4(c, 1.0);
+}
+

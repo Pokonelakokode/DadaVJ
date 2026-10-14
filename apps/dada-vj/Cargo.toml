@@ -11,6 +11,7 @@ anyhow = "1.0.104"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 dada-audio.workspace = true
 dada-core.workspace = true
+dada-fx.workspace = true
 dada-media.workspace = true
 env_logger = "0.11.11"
 log = "0.4.34"

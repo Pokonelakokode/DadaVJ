@@ -35,6 +35,10 @@ pub struct Args {
     pub audio_device: Option<String>,
     /// Automatikus audio-validáció (szintetikus forrás + pixel-visszaolvasás).
     pub audio_check: bool,
+    /// ISF shader (generátor/effekt) betöltése és renderelése.
+    pub shader: Option<String>,
+    /// Automatikus shader-validáció (offscreen render + pixel-visszaolvasás).
+    pub shader_check: bool,
 }
 
 impl Default for Args {
@@ -52,6 +56,8 @@ impl Default for Args {
             audio_visual: false,
             audio_device: None,
             audio_check: false,
+            shader: None,
+            shader_check: false,
         }
     }
 }
@@ -87,11 +93,13 @@ impl Args {
                 "--audio-visual" => args.audio_visual = true,
                 "--audio" => args.audio_device = it.next(),
                 "--audio-check" => args.audio_check = true,
+                "--shader" => args.shader = it.next(),
+                "--shader-check" => args.shader_check = true,
                 "--no-vsync" => args.vsync = false,
                 "--fullscreen" => args.fullscreen = true,
                 "-h" | "--help" => {
                     println!(
-                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
+                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
                         env!("CARGO_PKG_VERSION")
                     );
                     std::process::exit(0);
@@ -106,6 +114,11 @@ impl Args {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse()?;
+
+    // Headless shader-validáció.
+    if args.shader_check {
+        return pollster::block_on(bench::shader_check(&args));
+    }
 
     // Headless audio-validáció.
     if args.audio_check {
