@@ -111,15 +111,18 @@ $BIN --video media/loop.mp4 --rtmp rtmp://127.0.0.1:19390/live/teszt
 Mért eredmények (M4 Pro) — részletek a docs/-ban:
 
 ```
-4 réteg, 1920x1080          59.7 fps · p50 16.66 ms · CPU 6.9%
+4 réteg, 1920x1080          59.0 fps · p50 16.67 ms · CPU 5.9% · RSS 98 MB
 4 réteg + felvétel          59.1 fps · p50 16.65 ms · CPU 6.1%
 2 réteg + ISF effekt        59.7 fps · p50 16.66 ms
 videó-dekód (1080p)         733 fps (zero-copy textúra-csere 10.2 us/frame)
 audio FFT (2048)            8.5 us/frame (~1256x valós idő)
-felvétel                    188 frame / 5.09 s (valós idejű MP4)
-RTMP (kép + hang)           222 videó-tag (8 keyframe) + 286 audió-tag, 0 hiba
+H.264 encode (hardveres)    530 fps @ 640x360
+AAC-LC encode               46 packet / 3 ms (288x valós idő), ASC [11,90]
+felvétel                    151 frame / 4.10 s (valós idejű MP4, 5.9 MB)
+RTMP (kép + hang)           190 videó-tag (7 keyframe) + 240 audió-tag, 0 hiba
 Ableton Link                128.00 BPM pontosan, fázis-hiteles
 klipváltás                  4-12 ms
+thumbnail (240x135)         19-200 ms, 3.5-6 KB
 ```
 
 ## Elvek

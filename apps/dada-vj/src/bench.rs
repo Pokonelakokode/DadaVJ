@@ -579,6 +579,14 @@ pub async fn midi_check(args: &Args) -> Result<()> {
 }
 
 /// Automatikus ISF-validáció: a shader lefordul, lefut, és a kimenet változik?
+/// Az ISF fejléc képi bemeneteinek nevei (a kiíráshoz).
+fn effect_image_names(path: &str) -> String {
+    match IsfShader::load(Path::new(path)) {
+        Ok(s) => s.images.join(", "),
+        Err(_) => "?".to_string(),
+    }
+}
+
 pub async fn shader_check(args: &Args) -> Result<()> {
     let Some(path) = args.shader.clone() else {
         bail!("a --shader-check-hez kell --shader FAJL.isf");
@@ -606,7 +614,18 @@ pub async fn shader_check(args: &Args) -> Result<()> {
         println!("  kihagyott inputok (nem támogatott típus): {}", shader.skipped.join(", "));
     }
 
+    let has_inputs = !shader.images.is_empty();
     let mut effect = Effect::new(renderer.device(), format, shader)?;
+    if has_inputs {
+        // A shader lefordult és a bind group (a képi bemenet bindings-ével)
+        // felépült — ennyit tud igazolni ez az önálló ellenőrzés. A kimenet
+        // fekete, mert nincs forrás; az élő út (lentebbi rétegek a bemenet)
+        // külön igazolt (lásd docs/17).
+        println!("  képi bemenet(ek): {} — a shader lefordult, a bind group felépült.", effect_image_names(&path));
+        println!("  A kimenet önmagában fekete (nincs forrás) — ez nem hiba;");
+        println!("  az élő ellenőrzés: --video ... --shader ... --serve");
+        return Ok(());
+    }
     let mut samples: Vec<(u32, [u8; 3])> = Vec::new();
     let frames = 180u32;
     for i in 0..frames {
