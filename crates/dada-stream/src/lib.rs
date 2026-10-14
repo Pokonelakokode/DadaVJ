@@ -6,6 +6,7 @@
 
 pub mod flv;
 pub mod rtmp;
+pub mod sink;
 
 pub use flv::{avc_frame, avc_sequence_header, avcc_from_sps_pps, VIDEO_TAG};
 pub use rtmp::{RtmpPublisher, StatsSnapshot, VideoFrame};

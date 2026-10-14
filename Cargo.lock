@@ -625,6 +625,7 @@ dependencies = [
  "dada-fx",
  "dada-media",
  "dada-midi",
+ "dada-stream",
  "env_logger",
  "jpeg-encoder",
  "libc",

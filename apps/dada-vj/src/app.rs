@@ -38,6 +38,15 @@ pub struct App {
     project: crate::project::Project,
     /// Felvétel: AVAssetWriter + a pixel bufferek Metal-csomagolója.
     recorder: Option<dada_media::macos::writer::VideoWriter>,
+    /// RTMP stream: hardveres encoder + publikáló.
+    encoder: Option<dada_media::macos::encoder::VideoEncoder>,
+    publisher: Option<dada_stream::RtmpPublisher>,
+    enc_cache: Option<dada_media::macos::metal::MetalTextureCache>,
+    enc_start: Instant,
+    enc_next: Instant,
+    sent_avcc: bool,
+    enc_fps: f64,
+    enc_captures: u64,
     rec_cache: Option<dada_media::macos::metal::MetalTextureCache>,
     rec_next: Instant,
     rec_start: Instant,
@@ -92,6 +101,14 @@ impl App {
             project,
             deck_configs,
             recorder: None,
+            encoder: None,
+            publisher: None,
+            enc_cache: None,
+            enc_start: now,
+            enc_next: now,
+            sent_avcc: false,
+            enc_fps: 60.0,
+            enc_captures: 0,
             rec_cache: None,
             rec_next: now,
             rec_start: now,
@@ -123,6 +140,48 @@ impl App {
             started: now,
             last_frame: now,
             summary_printed: false,
+        }
+    }
+
+    /// A stream lezárása: a maradék frame-ek kiadása, majd a kapcsolat bontása.
+    fn stop_streaming(&mut self) {
+        if let Some(mut enc) = self.encoder.take() {
+            enc.finish();
+            let avcc = enc.avcc();
+            let frames = enc.drain();
+            if let Some(p) = self.publisher.as_ref() {
+                if !self.sent_avcc {
+                    if let Some(avcc) = &avcc {
+                        p.send(dada_stream::VideoFrame {
+                            data: dada_stream::flv::avc_sequence_header(avcc),
+                            pts_ms: 0,
+                        });
+                        self.sent_avcc = true;
+                    }
+                }
+                for frame in &frames {
+                    p.send(dada_stream::VideoFrame {
+                        data: dada_stream::flv::avc_frame(&frame.data, frame.keyframe, 0),
+                        pts_ms: frame.pts_ms as u64,
+                    });
+                }
+            }
+            log::info!(
+                "stream lezárva: {} frame ({} rögzítési ciklus, {} callback)",
+                frames.len(),
+                self.enc_captures,
+                enc.callbacks()
+            );
+        }
+        if let Some(mut p) = self.publisher.take() {
+            let s = p.stats();
+            p.stop();
+            log::info!(
+                "RTMP: {} frame elküldve, {} eldobva, {:.1} KB",
+                s.sent,
+                s.dropped,
+                s.bytes as f64 / 1024.0
+            );
         }
     }
 
@@ -545,6 +604,7 @@ impl App {
                 if t as f64 >= secs {
                     self.print_summary();
                     self.finish_recording();
+                    self.stop_streaming();
                     event_loop.exit();
                     return;
                 }
@@ -589,6 +649,79 @@ impl App {
                                 log::error!("a felvétel-puffer nem csomagolható: {e:#}")
                             }
                             None => {}
+                        }
+                    }
+                }
+            }
+
+            // Stream: hardveres encode, majd RTMP-re.
+            if self.encoder.is_some() && self.publisher.is_some() && self.enc_cache.is_some() {
+                let now = Instant::now();
+                if now >= self.enc_next {
+                    let fps = self.enc_fps;
+                    self.enc_next = now + Duration::from_secs_f64(1.0 / fps);
+                    if let Some(enc) = self.encoder.as_ref() {
+                        match enc.pixel_buffer() {
+                            Ok(buffer) => {
+                                let (ew, eh) = enc.size;
+                                let wrapped = {
+                                    let device = renderer.device();
+                                    self.enc_cache.as_ref().map(|c| {
+                                        c.wrap_bgra_with_usage(
+                                            device,
+                                            &buffer,
+                                            ew,
+                                            eh,
+                                            wgpu::TextureUsages::TEXTURE_BINDING
+                                                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                                                | wgpu::TextureUsages::COPY_SRC,
+                                        )
+                                    })
+                                };
+                                match wrapped {
+                                    Some(Ok(wrapped)) => {
+                                        let view = wrapped.view();
+                                        renderer.render_to(&view, (ew, eh), t, beat, &layers);
+                                        let pts =
+                                            self.enc_start.elapsed().as_secs_f64() * 1000.0;
+                                        if let Err(e) = enc.encode(&buffer, pts) {
+                                            log::error!("encode hiba: {e:#}");
+                                        }
+                                    }
+                                    Some(Err(e)) => {
+                                        log::error!("a stream-puffer nem csomagolható: {e:#}")
+                                    }
+                                    None => {}
+                                }
+                            }
+                            Err(e) => log::error!("nincs encoder puffer: {e:#}"),
+                        }
+                        // A kész frame-ek továbbítása.
+                        self.enc_captures += 1;
+                        let avcc = enc.avcc();
+                        for frame in enc.drain() {
+                            if !self.sent_avcc {
+                                if let Some(avcc) = &avcc {
+                                    if let Some(p) = self.publisher.as_ref() {
+                                        p.send(dada_stream::VideoFrame {
+                                            data: dada_stream::flv::avc_sequence_header(avcc),
+                                            pts_ms: 0,
+                                        });
+                                    }
+                                    self.sent_avcc = true;
+                                    log::info!("RTMP: avcC sequence header elküldve");
+                                }
+                            }
+                            if let Some(p) = self.publisher.as_ref() {
+                                p.send(dada_stream::VideoFrame {
+                                    data: dada_stream::flv::avc_frame(
+                                        &frame.data,
+                                        frame.keyframe,
+                                        0,
+                                    ),
+                                    pts_ms: frame.pts_ms as u64,
+                                });
+                            }
                         }
                     }
                 }
@@ -1053,6 +1186,34 @@ impl ApplicationHandler for App {
                     Err(e) => log::error!("a felvétel textúra-cache nem hozható létre: {e:#}"),
                 },
                 Err(e) => log::error!("a felvétel nem indítható: {e:#}"),
+            }
+        }
+
+        // RTMP stream indítása (hardveres encoder + háttérszálas publikáló).
+        if let Some(url) = self.args.rtmp.clone() {
+            let (ew, eh) = renderer.size();
+            let bitrate = 8_000_000u32;
+            match dada_media::macos::encoder::VideoEncoder::new(ew, eh, bitrate, 60) {
+                Ok(encoder) => match dada_stream::RtmpPublisher::start(&url) {
+                    Ok(publisher) => match dada_media::macos::metal::MetalTextureCache::new(
+                        renderer.device(),
+                    ) {
+                        Ok(cache) => {
+                            log::info!(
+                                "RTMP stream: {url} ({ew}x{eh}, {:.1} Mbit/s)",
+                                bitrate as f64 / 1_000_000.0
+                            );
+                            self.encoder = Some(encoder);
+                            self.publisher = Some(publisher);
+                            self.enc_cache = Some(cache);
+                            self.enc_start = Instant::now();
+                            self.enc_next = Instant::now();
+                        }
+                        Err(e) => log::error!("a stream textúra-cache nem hozható létre: {e:#}"),
+                    },
+                    Err(e) => log::error!("az RTMP publikáló nem indul: {e:#}"),
+                },
+                Err(e) => log::error!("az encoder nem hozható létre: {e:#}"),
             }
         }
 

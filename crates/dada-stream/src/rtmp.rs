@@ -187,6 +187,10 @@ fn run_inner(url: &str, rx: Receiver<VideoFrame>, stats: &Stats) -> Result<()> {
     }
 
     // 2. Session: connect -> publish.
+    // Megjegyzés: az rml_rtmp szerver-oldali deszerializálója (amit a saját
+    // teszfogadónk használ) megbotlik a több-chunkos üzeneteken, ezért a
+    // teszfogadó csak kicsi frame-eket tud ellenőrizni. A kliens-oldali
+    // szerializálást az rml_rtmp saját tesztjei fedik.
     let (mut session, initial) = ClientSession::new(ClientSessionConfig::new())?;
     write_results(&mut stream, initial)?;
     let connect = session.request_connection(app)?;

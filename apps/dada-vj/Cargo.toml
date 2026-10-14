@@ -14,6 +14,7 @@ dada-core.workspace = true
 dada-fx.workspace = true
 dada-media.workspace = true
 dada-midi.workspace = true
+dada-stream = { version = "0.1.0", path = "../../crates/dada-stream" }
 env_logger = "0.11.11"
 jpeg-encoder = "0.6.1"
 libc = "0.2.190"

@@ -70,6 +70,10 @@ pub struct Args {
     pub record_check: bool,
     /// Egy videófájl vizsgálata (headless): méret, frame-szám, hossz.
     pub probe: Option<String>,
+    /// RTMP stream cél-URL (pl. rtmp://a.rtmp.youtube.com/live2/KULCS).
+    pub rtmp: Option<String>,
+    /// Az encoder önálló validációja (headless).
+    pub encode_check: bool,
     /// Beépített web-szerver (vezérlő UI + MJPEG előnézet).
     pub serve: bool,
     /// A web-szerver portja.
@@ -108,6 +112,8 @@ impl Default for Args {
             record: None,
             record_check: false,
             probe: None,
+            rtmp: None,
+            encode_check: false,
             serve: false,
             port: 7777,
         }
@@ -172,6 +178,8 @@ impl Args {
                 "--record" => args.record = it.next(),
                 "--record-check" => args.record_check = true,
                 "--probe" => args.probe = it.next(),
+                "--rtmp" => args.rtmp = it.next(),
+                "--encode-check" => args.encode_check = true,
                 "--project" => args.project = it.next(),
                 "--save" => args.save = it.next(),
                 "--serve" => args.serve = true,
@@ -188,7 +196,7 @@ impl Args {
                 "--fullscreen" => args.fullscreen = true,
                 "-h" | "--help" => {
                     println!(
-                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --midi              MIDI-bemenetek megnyitása (több forrás egyszerre)\n  --midi-visual       MIDI note -> envelope -> shader paraméter\n  --midi-check        automatikus MIDI-validáció (headless)\n  --deck MAPPA[:UTEM[:BLEND]]  videó-mappa mint clip-bank (többször ismételhető)\n  --autopilot N       autopilot váltás N ütem után (alap: 16)\n  --mod FORRAS->CEL[:MENNY[:DECAY]]  modulációs útvonal (többször ismételhető)\n      források: note:N, cc:N, audio.sub|bass|low_mid|mid|high_mid|high|rms|onset, lfo:UTEM, clock.phase\n      célok:    deck.opacity.N, deck.next.N, shader.param.N, audio.opacity, master.opacity\n  --mod-check         automatikus modulációs validáció (headless)\n  --project FAJL.toml projekt betöltése\n  --save FAJL.toml    a felállás mentése és kilépés\n  --serve             webes vezérlő UI + MJPEG előnézet (127.0.0.1:7777)\n  --port N            a web-szerver portja\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
+                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --midi              MIDI-bemenetek megnyitása (több forrás egyszerre)\n  --midi-visual       MIDI note -> envelope -> shader paraméter\n  --midi-check        automatikus MIDI-validáció (headless)\n  --deck MAPPA[:UTEM[:BLEND]]  videó-mappa mint clip-bank (többször ismételhető)\n  --autopilot N       autopilot váltás N ütem után (alap: 16)\n  --mod FORRAS->CEL[:MENNY[:DECAY]]  modulációs útvonal (többször ismételhető)\n      források: note:N, cc:N, audio.sub|bass|low_mid|mid|high_mid|high|rms|onset, lfo:UTEM, clock.phase\n      célok:    deck.opacity.N, deck.next.N, shader.param.N, audio.opacity, master.opacity\n  --mod-check         automatikus modulációs validáció (headless)\n  --rtmp URL          RTMP stream (pl. rtmp://a.rtmp.youtube.com/live2/KULCS)\n  --encode-check      az encoder önálló validációja (headless)\n  --project FAJL.toml projekt betöltése\n  --save FAJL.toml    a felállás mentése és kilépés\n  --serve             webes vezérlő UI + MJPEG előnézet (127.0.0.1:7777)\n  --port N            a web-szerver portja\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
                         env!("CARGO_PKG_VERSION")
                     );
                     std::process::exit(0);
@@ -220,6 +228,11 @@ fn main() -> Result<()> {
     // Egy videófájl vizsgálata.
     if let Some(path) = args.probe.clone() {
         return pollster::block_on(bench::probe(&path));
+    }
+
+    // Headless encoder-validáció.
+    if args.encode_check {
+        return pollster::block_on(bench::encode_check(&args));
     }
 
     // Headless felvétel-validáció.

@@ -167,3 +167,53 @@ fn publishes_video_to_a_local_server() {
     );
     assert_eq!(stats.sent, 5, "a küldött frame-ek száma");
 }
+
+/// Nagy (20 KB) videó-frame — a több-chunkos üzenetek útja.
+#[test]
+#[ignore = "ismert rml_rtmp szerver-oldali deszerializalo hiba tobb-chunkos uzeneteknel"]
+fn large_video_frames_round_trip() {
+    use dada_stream::sink::serve_one;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        serve_one(stream, 12).expect("a fogadó hibázott")
+    });
+
+    let url = format!("rtmp://127.0.0.1:{port}/live/nagy");
+    let mut publisher = RtmpPublisher::start(&url).expect("publikáló");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !publisher.is_connected() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(publisher.is_connected(), "nem kapcsolódott: {:?}", publisher.stats().error);
+
+    // Egy 20 KB-os "NALU" (több chunk).
+    let big = vec![0x42u8; 20_000];
+    publisher.send(VideoFrame {
+        data: flv::avc_frame(&big, true, 0),
+        pts_ms: 0,
+    });
+    for i in 1..=10u64 {
+        publisher.send(VideoFrame {
+            data: flv::avc_frame(&big, false, 0),
+            pts_ms: i * 33,
+        });
+    }
+
+    let stats = server.join().expect("szerver szál");
+    println!(
+        "nagy frame teszt: {} tag, {} keyframe, {} bájt, első tag {} bájt",
+        stats.video_tags,
+        stats.keyframes,
+        stats.bytes,
+        stats.first_tag.len()
+    );
+    assert!(
+        stats.video_tags >= 11,
+        "csak {} tag érkezett meg a 11-ből",
+        stats.video_tags
+    );
+}
+

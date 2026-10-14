@@ -25,6 +25,87 @@ use anyhow::{bail, Result};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Az encoder önálló validációja: CPU-töltött képek -> hardveres H.264.
+pub async fn encode_check(_args: &Args) -> Result<()> {
+    use dada_media::macos::encoder::VideoEncoder;
+    use dada_media::macos::writer::VideoWriter;
+
+    let (w, h) = (640u32, 360u32);
+    let fps = 30u32;
+    let frames = 30u64;
+    println!("ENCODE-CHECK — {w}x{h} @ {fps} fps, {frames} frame (VTCompressionSession)");
+
+    let mut encoder = VideoEncoder::new(w, h, 2_000_000, fps)?;
+    let t0 = std::time::Instant::now();
+    for i in 0..frames {
+        let pb = encoder.pixel_buffer()?;
+        let x0 = (i as u32 * 8) % w;
+        VideoWriter::fill(&pb, |row, y| {
+            for (x, px) in row.chunks_mut(4).enumerate() {
+                let xu = x as u32;
+                let on = xu >= x0 && xu < x0 + 60 && (y as u32) >= 100 && (y as u32) < 180;
+                let (b, g, r) = if on {
+                    (255u8, 255u8, 255u8)
+                } else {
+                    (200u8, 50u8, 10u8)
+                };
+                px[0] = b;
+                px[1] = g;
+                px[2] = r;
+                px[3] = 255;
+            }
+        })?;
+        encoder.encode(&pb, i as f64 / fps as f64 * 1000.0)?;
+    }
+    let wall = t0.elapsed();
+    encoder.finish();
+    let encoded = encoder.drain();
+    let errors = encoder.errors();
+    let avcc = encoder.avcc();
+
+    let total_bytes: usize = encoded.iter().map(|f| f.data.len()).sum();
+    let keyframes = encoded.iter().filter(|f| f.keyframe).count();
+    println!(
+        "  {} frame kódolva {:.0} ms alatt ({:.0} fps), {:.1} KB, {} keyframe",
+        encoded.len(),
+        wall.as_secs_f64() * 1000.0,
+        encoded.len() as f64 / wall.as_secs_f64(),
+        total_bytes as f64 / 1024.0,
+        keyframes
+    );
+    match &avcc {
+        Some(a) => println!("  avcC: {} bájt, kezdete {:02X?}", a.len(), &a[..a.len().min(8)]),
+        None => println!("  avcC: hiányzik!"),
+    }
+    if let Some(first) = encoded.first() {
+        println!(
+            "  első frame: {} bájt, pts {:.1} ms, keyframe={}, kezdete {:02X?}",
+            first.data.len(),
+            first.pts_ms,
+            first.keyframe,
+            &first.data[..first.data.len().min(8)]
+        );
+    }
+    if !errors.is_empty() {
+        bail!("encoder hibák: {:?}", errors);
+    }
+    if encoded.len() < (frames as usize * 8 / 10) {
+        bail!("túl kevés frame készült: {}", encoded.len());
+    }
+    let avcc = avcc.ok_or_else(|| anyhow::anyhow!("nincs avcC (SPS/PPS)"))?;
+    if avcc[0] != 0x01 {
+        bail!("az avcC configurationVersion nem 1: {}", avcc[0]);
+    }
+    if avcc.len() < 10 {
+        bail!("az avcC túl rövid: {}", avcc.len());
+    }
+    if keyframes == 0 {
+        bail!("nem készült keyframe");
+    }
+    println!("  OK: valódi hardveres H.264, érvényes avcC-vel és keyframe-mel.");
+    Ok(())
+}
+
 /// Egy videófájl vizsgálata: méret, frame-szám, hossz (headless).
 pub async fn probe(path: &str) -> Result<()> {
     use dada_media::macos::reader::VideoReader;
