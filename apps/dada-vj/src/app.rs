@@ -1,9 +1,11 @@
 //! Az alkalmazás életciklusa és a frame-ciklus.
 
+use crate::audio_vis::AudioVisual;
 use crate::hud::FrameStats;
-use crate::renderer::Renderer;
+use crate::renderer::{AudioLayerRef, Renderer};
 use crate::video::VideoLayer;
 use crate::Args;
+use dada_audio::AudioEngine;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
@@ -17,6 +19,7 @@ pub struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     video: Option<VideoLayer>,
+    audio: Option<(AudioEngine, AudioVisual)>,
     stats: FrameStats,
     started: Instant,
     last_frame: Instant,
@@ -31,6 +34,7 @@ impl App {
             window: None,
             renderer: None,
             video: None,
+            audio: None,
             stats: FrameStats::new(3600),
             started: now,
             last_frame: now,
@@ -62,8 +66,21 @@ impl App {
             },
             None => None,
         };
+        // Audio-elemzés + GPU-textúrák frissítése.
+        let audio_layer = match self.audio.as_mut() {
+            Some((engine, vis)) => {
+                let snapshot = engine.process();
+                let (w, h) = renderer.size();
+                vis.update(renderer.queue(), &snapshot, t, w, h);
+                Some(AudioLayerRef {
+                    pipeline: vis.pipeline(),
+                    bind_group: vis.bind_group(),
+                })
+            }
+            None => None,
+        };
         if let Some(window) = self.window.as_ref() {
-            match renderer.render(t, beat, self.args.layers, video_view) {
+            match renderer.render(t, beat, self.args.layers, video_view, audio_layer) {
                 Ok(()) => {
                     // Csak a vsync-hez igazított, tényleges frame-eket mérjük.
                     self.stats.push(dt_ms as f32);
@@ -154,6 +171,32 @@ impl ApplicationHandler for App {
                 }
                 Err(e) => log::error!("a videó nem nyitható meg: {e:#}"),
             }
+        }
+        if self.args.audio_visual {
+            let dev = self.args.audio_device.as_deref();
+            let engine = match dev {
+                Some(dev) => {
+                    let dev = if dev == "default" { None } else { Some(dev) };
+                    match AudioEngine::input(48000.0, dev) {
+                    Ok(e) => e,
+                        Err(err) => {
+                            log::error!(
+                                "audio bemenet nem nyitható meg ({err:#}), szintetikus forrás"
+                            );
+                            AudioEngine::synthetic(48000.0)
+                        }
+                    }
+                }
+                None => AudioEngine::synthetic(48000.0),
+            };
+            let (w, h) = renderer.size();
+            let vis = AudioVisual::new(renderer.device(), renderer.format(), w, h);
+            log::info!(
+                "audio-vizuál bekapcsolva: {:?} @ {} Hz",
+                engine.kind(),
+                engine.sample_rate()
+            );
+            self.audio = Some((engine, vis));
         }
         self.renderer = Some(renderer);
         self.window = Some(window.clone());

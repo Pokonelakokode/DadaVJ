@@ -1,0 +1,13 @@
+[package]
+name = "dada-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+cpal = "0.17.3"
+log = "0.4.34"
+rustfft = "6.4.1"

@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 authors = ["Krisztián Gyurkó"]
 
 [workspace.dependencies]
+dada-audio = { path = "crates/dada-audio" }
 dada-core = { path = "crates/dada-core" }
 dada-media = { path = "crates/dada-media" }
 

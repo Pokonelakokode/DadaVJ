@@ -244,6 +244,17 @@ impl Renderer {
         &self.device
     }
 
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        match &self.target {
+            Target::Surface { config, .. } => (config.width, config.height),
+            Target::Offscreen { size, .. } => *size,
+        }
+    }
+
     pub fn gpu_timing_available(&self) -> bool {
         self.timers.is_some()
     }
@@ -273,6 +284,7 @@ impl Renderer {
         beat: f32,
         layers: u32,
         video: Option<&wgpu::TextureView>,
+        audio: Option<AudioLayerRef<'_>>,
     ) -> Result<(), wgpu::SurfaceError> {
         match &self.target {
             Target::Surface { surface, config } => {
@@ -293,6 +305,7 @@ impl Renderer {
                     beat,
                     layers,
                     video,
+                    audio,
                 );
                 self.queue.submit(Some(encoder.finish()));
                 frame.present();
@@ -304,7 +317,7 @@ impl Renderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frame-offscreen"),
                         });
-                self.draw(&mut encoder, view, *size, time, beat, layers, video);
+                self.draw(&mut encoder, view, *size, time, beat, layers, video, audio);
                 self.queue.submit(Some(encoder.finish()));
                 Ok(())
             }
@@ -331,7 +344,7 @@ impl Renderer {
         // encoder végén rögzíti, ezért egy üres blittel kikényszerítjük.
         encoder.write_timestamp(&timers.query_set, 0);
         encoder.clear_buffer(&timers.flush, 0, Some(4));
-        self.draw(&mut encoder, view, *size, time, beat, layers, None);
+        self.draw(&mut encoder, view, *size, time, beat, layers, None, None);
         // 2. minta: a render pass után.
         encoder.write_timestamp(&timers.query_set, 1);
         encoder.resolve_query_set(&timers.query_set, 0..2, &timers.resolve, 0);
@@ -365,6 +378,7 @@ impl Renderer {
         beat: f32,
         layers: u32,
         video: Option<&wgpu::TextureView>,
+        audio: Option<AudioLayerRef<'_>>,
     ) {
         let uniforms = Uniforms {
             resolution: [size.0 as f32, size.1 as f32],
@@ -393,7 +407,12 @@ impl Renderer {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        if let Some(video_view) = video {
+        if let Some(audio) = audio {
+            // Audio-vizuál: spektrogram + hullámforma + spektrum.
+            pass.set_pipeline(audio.pipeline);
+            pass.set_bind_group(0, audio.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        } else if let Some(video_view) = video {
             // Videó-réteg: a zero-copy MTLTexture-t mintavételezzük.
             pass.set_pipeline(&self.video_pipeline);
             let video_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -529,6 +548,12 @@ fn create_timers(device: &wgpu::Device, features: wgpu::Features) -> Option<Time
         readback,
         flush,
     })
+}
+
+/// Egy audio-réteg referenciája (a pipeline és a bind group a hívóé).
+pub struct AudioLayerRef<'a> {
+    pub pipeline: &'a wgpu::RenderPipeline,
+    pub bind_group: &'a wgpu::BindGroup,
 }
 
 /// A videó-réteg pipeline-ja: egy textúra + lineáris sampler.

@@ -115,3 +115,93 @@ fn fs_main(in : VOut) -> @location(0) vec4<f32> {
     let alpha = select(1.0, 0.6, in.layer > 0u);
     return vec4<f32>(col, alpha);
 }
+
+// ---------------------------------------------------------------------------
+// Audio-vizual: gördülő spektrogram + hullámforma + spektrum-sávok.
+// ---------------------------------------------------------------------------
+
+struct AudioUniforms {
+    resolution : vec4<f32>,
+    info : vec4<f32>,
+    bands : vec4<f32>,
+    bands2 : vec4<f32>,
+};
+
+@group(0) @binding(0) var spectrogram_tex : texture_2d<f32>;
+@group(0) @binding(1) var waveform_tex : texture_2d<f32>;
+@group(0) @binding(2) var spectrum_tex : texture_2d<f32>;
+@group(0) @binding(3) var<uniform> au : AudioUniforms;
+
+struct VOutAudio {
+    @builtin(position) pos : vec4<f32>,
+    @location(0) uv : vec2<f32>,
+};
+
+@vertex
+fn vs_audio(@builtin(vertex_index) vi : u32) -> VOutAudio {
+    var p = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0)
+    );
+    var o : VOutAudio;
+    o.pos = vec4<f32>(p[vi], 0.0, 1.0);
+    o.uv = vec2<f32>((p[vi].x + 1.0) * 0.5, 1.0 - (p[vi].y + 1.0) * 0.5);
+    return o;
+}
+
+fn heat(v : f32) -> vec3<f32> {
+    let c = clamp(v, 0.0, 1.0);
+    let a = vec3<f32>(0.04, 0.02, 0.12);
+    let b = vec3<f32>(0.40, 0.08, 0.55);
+    let d = vec3<f32>(1.00, 0.50, 0.12);
+    let e = vec3<f32>(1.00, 1.00, 0.85);
+    if (c < 0.35) { return mix(a, b, c / 0.35); }
+    if (c < 0.70) { return mix(b, d, (c - 0.35) / 0.35); }
+    return mix(d, e, (c - 0.70) / 0.30);
+}
+
+@fragment
+fn fs_audio(in : VOutAudio) -> @location(0) vec4<f32> {
+    let uv = in.uv;
+    let write_col = au.info.x;
+
+    // A textúra 256 (frekvencia) x 512 (idő): a legfrissebb sor a jobb szélen.
+    let time_row = i32(write_col + uv.x * 512.0) % 512;
+    let freq_col = i32((1.0 - uv.y) * 255.0);
+    let spec = textureLoad(spectrogram_tex, vec2<i32>(freq_col, time_row), 0).r;
+
+    var c = heat(spec * 1.2);
+
+    // Hullámforma a felső sávban.
+    if (uv.y < 0.24) {
+        let wx = i32(uv.x * 1023.0);
+        let w = textureLoad(waveform_tex, vec2<i32>(wx, 0), 0).r;
+        let dist = abs(uv.y - 0.12 - w * 0.09);
+        let line = smoothstep(0.007, 0.0, dist);
+        c = mix(c * 0.30, vec3<f32>(0.55, 1.0, 0.85), line);
+    }
+
+    // Spektrum-sávok az alsó sávban.
+    if (uv.y > 0.80) {
+        let bin = i32(uv.x * 511.0);
+        let s = textureLoad(spectrum_tex, vec2<i32>(bin, 0), 0).r;
+        let h = (uv.y - 0.80) / 0.20;
+        if (h < s) {
+            c = mix(c, heat(0.35 + 0.65 * s), 0.9);
+        }
+    }
+
+    // Ütés-villanás + sáv-alapú színezés.
+    let onset = au.bands2.w;
+    let bass = au.bands.y;
+    c += vec3<f32>(0.30, 0.18, 0.05) * onset;
+    c += vec3<f32>(0.05, 0.02, 0.10) * bass;
+
+    // Vignetta.
+    let d = length(uv - vec2<f32>(0.5, 0.5)) * 1.15;
+    c *= 1.0 - clamp(d, 0.0, 1.0) * 0.28;
+
+    return vec4<f32>(c, 1.0);
+}
+
