@@ -43,6 +43,18 @@ Első mérési eredmény (M4 Pro): 1080p-n egy teljes képernyős, alpha-blendel
 a 4 layeres teljes kép ~**0.28 ms** — a 16.67 ms-os büdzsé **1.7%-a**. A kompozitálás tehát nem
 szűk keresztmetszet; a büdzsét a videó-dekód és a drága shaderek töltik ki.
 
+## Használat
+
+¤¤¤bash
+source scripts/env.sh
+cargo run --release -p dada-vj -- --shader shaders/plasma.isf --serve
+# -> böngésző: http://127.0.0.1:7777/   (élő előnézet + vezérlés)
+
+cargo run --release -p dada-vj -- --video .testmedia/hero.mp4       # videó, zero-copy
+cargo run --release -p dada-vj -- --audio-visual --audio default    # audio-reaktív
+cargo run --release -p dada-vj -- --shader shaders/plasma.isf --midi-visual
+¤¤¤
+
 ## Elvek
 
 1. **Zero-copy** a videó úton: VideoToolbox → IOSurface → Metal textúra, CPU-másolás nélkül.

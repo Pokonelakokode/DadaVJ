@@ -9,6 +9,7 @@ mod bench;
 mod hud;
 mod renderer;
 mod video;
+mod web;
 
 use anyhow::Result;
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -45,6 +46,10 @@ pub struct Args {
     pub midi_visual: bool,
     /// Automatikus MIDI-validáció (szintetikus clock + note stream, headless).
     pub midi_check: bool,
+    /// Beépített web-szerver (vezérlő UI + MJPEG előnézet).
+    pub serve: bool,
+    /// A web-szerver portja.
+    pub port: u16,
 }
 
 impl Default for Args {
@@ -67,6 +72,8 @@ impl Default for Args {
             midi: false,
             midi_visual: false,
             midi_check: false,
+            serve: false,
+            port: 7777,
         }
     }
 }
@@ -110,11 +117,17 @@ impl Args {
                     args.midi_visual = true;
                 }
                 "--midi-check" => args.midi_check = true,
+                "--serve" => args.serve = true,
+                "--port" => {
+                    let v = it.next().unwrap_or_else(|| "7777".into());
+                    args.port = v.parse()?;
+                    args.serve = true;
+                }
                 "--no-vsync" => args.vsync = false,
                 "--fullscreen" => args.fullscreen = true,
                 "-h" | "--help" => {
                     println!(
-                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --midi              MIDI-bemenetek megnyitása (több forrás egyszerre)\n  --midi-visual       MIDI note -> envelope -> shader paraméter\n  --midi-check        automatikus MIDI-validáció (headless)\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
+                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --midi              MIDI-bemenetek megnyitása (több forrás egyszerre)\n  --midi-visual       MIDI note -> envelope -> shader paraméter\n  --midi-check        automatikus MIDI-validáció (headless)\n  --serve             webes vezérlő UI + MJPEG előnézet (127.0.0.1:7777)\n  --port N            a web-szerver portja\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
                         env!("CARGO_PKG_VERSION")
                     );
                     std::process::exit(0);

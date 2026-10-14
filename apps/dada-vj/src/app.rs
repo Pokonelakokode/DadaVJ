@@ -4,6 +4,7 @@ use crate::audio_vis::AudioVisual;
 use crate::hud::FrameStats;
 use crate::renderer::{LayerRef, Renderer};
 use crate::video::VideoLayer;
+use crate::web::{self, Command, WebShared};
 use crate::Args;
 use dada_audio::AudioEngine;
 use dada_fx::Effect;
@@ -27,6 +28,9 @@ pub struct App {
     midi: Option<MidiEngine>,
     shader_mtime: Option<SystemTime>,
     last_shader_check: Instant,
+    web: Option<Arc<WebShared>>,
+    last_preview: Instant,
+    last_fps: f32,
     stats: FrameStats,
     started: Instant,
     last_frame: Instant,
@@ -46,6 +50,9 @@ impl App {
             midi: None,
             shader_mtime: None,
             last_shader_check: Instant::now(),
+            web: None,
+            last_preview: Instant::now(),
+            last_fps: 0.0,
             stats: FrameStats::new(3600),
             started: now,
             last_frame: now,
@@ -84,6 +91,33 @@ impl App {
         if let Some(midi) = self.midi.as_mut() {
             midi.tick(t as f64, dt_ms as f32 / 1000.0);
             let _ = midi.take_events();
+        }
+
+        // Web-parancsok alkalmazása (még a réteg kiválasztása előtt).
+        if let Some(shared) = self.web.as_ref() {
+            for cmd in shared.take_commands() {
+                match cmd {
+                    Command::SetParam { index, value } => {
+                        if let Some(effect) = self.shader.as_mut() {
+                            if let Some(p) = effect.shader.params.get(index) {
+                                let mut v = p.default;
+                                if let Some(cur) = effect.values.get(index) {
+                                    v = *cur;
+                                }
+                                v[0] = value;
+                                effect.set_param(index, v);
+                            }
+                        }
+                    }
+                    Command::Trigger { note, velocity } => {
+                        if let Some(midi) = self.midi.as_mut() {
+                            let now = t as f64;
+                            midi.feed(0, &[0x90, note, velocity], now);
+                            midi.feed(0, &[0x80, note, 0], now);
+                        }
+                    }
+                }
+            }
         }
 
         // A látható réteg kiválasztása: shader > audio > videó.
@@ -150,6 +184,7 @@ impl App {
                     // Csak a vsync-hez igazított, tényleges frame-eket mérjük.
                     self.stats.push(dt_ms as f32);
                     if let Some(report) = self.stats.take_report() {
+                        self.last_fps = report.fps as f32;
                         println!("{}", report.line());
                     }
                 }
@@ -171,6 +206,69 @@ impl App {
                 }
             }
             window.request_redraw();
+        }
+
+        // Web: előnézet + állapot ~10 fps-en.
+        if self.web.is_some() && self.last_preview.elapsed() > Duration::from_millis(100) {
+            self.last_preview = Instant::now();
+            if let Some(rgb) = renderer.capture_preview(video_view, layer, t, beat) {
+                let mut jpeg = Vec::new();
+                let encoder = jpeg_encoder::Encoder::new(&mut jpeg, 72);
+                if encoder
+                    .encode(&rgb, 640, 360, jpeg_encoder::ColorType::Rgb)
+                    .is_ok()
+                {
+                    if let Some(shared) = self.web.as_ref() {
+                        shared.push_jpeg(jpeg);
+                    }
+                }
+            }
+            let (bpm, beats, midi_msgs) = match self.midi.as_ref() {
+                Some(m) => (m.bpm(), m.transport.beats_at(t as f64), m.messages_in),
+                None => (120.0f32, t as f64 * 2.0, 0u64),
+            };
+            let (shader_name, params) = match self.shader.as_ref() {
+                Some(effect) => {
+                    let list: Vec<serde_json::Value> = effect
+                        .shader
+                        .params
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| {
+                            let v = effect.values.get(i).map(|v| v[0]).unwrap_or(p.default[0]);
+                            serde_json::json!({
+                                "name": p.name,
+                                "value": v,
+                                "min": p.min,
+                                "max": p.max,
+                            })
+                        })
+                        .collect();
+                    (effect.shader.metadata.description.clone(), list)
+                }
+                None => (String::new(), Vec::new()),
+            };
+            let layer_name = if self.shader.is_some() {
+                "shader"
+            } else if self.audio.is_some() {
+                "audio"
+            } else if self.video.is_some() {
+                "video"
+            } else {
+                "teszt"
+            };
+            let state = serde_json::json!({
+                "fps": self.last_fps,
+                "bpm": bpm,
+                "beats": beats,
+                "midi_messages": midi_msgs,
+                "layer": layer_name,
+                "shader": shader_name,
+                "params": params,
+            });
+            if let Some(shared) = self.web.as_ref() {
+                shared.set_state(state.to_string());
+            }
         }
     }
 
@@ -288,7 +386,14 @@ impl ApplicationHandler for App {
                 Err(e) => log::error!("a shader nem tölthető be: {e:#}"),
             }
         }
-        if self.args.midi {
+        if self.args.serve {
+            let shared = WebShared::new();
+            match web::spawn(self.args.port, Arc::clone(&shared)) {
+                Ok(()) => self.web = Some(shared),
+                Err(e) => log::error!("{e:#}"),
+            }
+        }
+        if self.args.midi || self.args.serve {
             match MidiEngine::list_ports() {
                 Ok(ports) => {
                     if ports.is_empty() {

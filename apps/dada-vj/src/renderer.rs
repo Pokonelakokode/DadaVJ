@@ -58,6 +58,7 @@ pub struct Renderer {
     video_bgl: wgpu::BindGroupLayout,
     video_sampler: wgpu::Sampler,
     video_pipeline: wgpu::RenderPipeline,
+    preview: Option<PreviewTarget>,
 }
 
 impl Renderer {
@@ -149,6 +150,7 @@ impl Renderer {
             video_bgl,
             video_sampler,
             video_pipeline,
+            preview: None,
         })
     }
 
@@ -229,6 +231,7 @@ impl Renderer {
             video_bgl,
             video_sampler,
             video_pipeline,
+            preview: None,
         })
     }
 
@@ -494,6 +497,112 @@ impl Renderer {
         Some(data)
     }
 
+    /// Előnézet készítése: a réteg kicsinyített renderelése, majd CPU-ra olvasása.
+    ///
+    /// A kicsinyített textúrába renderelünk (nem a nagy képet olvassuk vissza),
+    /// így a readback költsége ~30x kisebb, és a shaderek ugyanazok.
+    pub fn capture_preview(
+        &mut self,
+        video: Option<&wgpu::TextureView>,
+        audio: Option<LayerRef<'_>>,
+        time: f32,
+        beat: f32,
+    ) -> Option<Vec<u8>> {
+        let (pw, ph) = (640u32, 360u32);
+        if self.preview.is_none() {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("preview"),
+                size: wgpu::Extent3d {
+                    width: pw,
+                    height: ph,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let bytes_per_row = ((pw * 4).div_ceil(256)) * 256;
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("preview-readback"),
+                size: (bytes_per_row * ph) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            self.preview = Some(PreviewTarget {
+                texture,
+                view,
+                size: (pw, ph),
+                buffer,
+                bytes_per_row,
+                pixels: vec![0u8; (bytes_per_row * ph) as usize],
+            });
+        }
+
+        // Kivesszük a self-ből, hogy a draw hívás közben ne legyen ütköző kölcsönzés.
+        let mut preview = self.preview.take()?;
+        let size = preview.size;
+        let bytes_per_row = preview.bytes_per_row;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("preview"),
+            });
+        self.draw(&mut encoder, &preview.view, size, time, beat, 1, video, audio);
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &preview.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &preview.buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(size.1),
+                },
+            },
+            wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = preview.buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        let _ = rx.recv();
+        {
+            let data = slice.get_mapped_range();
+            preview.pixels.copy_from_slice(&data);
+        }
+        preview.buffer.unmap();
+
+        // BGRA -> RGB, soronként (a padding kihagyásával).
+        let mut rgb = Vec::with_capacity((size.0 * size.1 * 3) as usize);
+        for y in 0..size.1 {
+            let row = (y * bytes_per_row) as usize;
+            for x in 0..size.0 {
+                let o = row + (x * 4) as usize;
+                rgb.push(preview.pixels[o + 2]);
+                rgb.push(preview.pixels[o + 1]);
+                rgb.push(preview.pixels[o]);
+            }
+        }
+        self.preview = Some(preview);
+        Some(rgb)
+    }
+
     /// Megvárja a GPU-t (benchmarkhoz).
     pub fn wait_idle(&self) {
         self.device.poll(wgpu::Maintain::Wait);
@@ -550,9 +659,20 @@ fn create_timers(device: &wgpu::Device, features: wgpu::Features) -> Option<Time
     })
 }
 
+/// Előnézet-cél: kicsinyített, CPU-ra visszaolvasható textúra.
+struct PreviewTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+    buffer: wgpu::Buffer,
+    bytes_per_row: u32,
+    pixels: Vec<u8>,
+}
+
 /// Egy egyedi réteg referenciája (a pipeline és a bind group a hívóé).
 ///
 /// Ugyanezt használja az audio-vizuál és az ISF shader-réteg is.
+#[derive(Clone, Copy)]
 pub struct LayerRef<'a> {
     pub pipeline: &'a wgpu::RenderPipeline,
     pub bind_group: &'a wgpu::BindGroup,
