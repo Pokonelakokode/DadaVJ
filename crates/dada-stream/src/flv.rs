@@ -31,6 +31,31 @@ pub fn avc_frame(nals: &[u8], keyframe: bool, composition_ms: i32) -> Vec<u8> {
     out
 }
 
+/// Az FLV audio-tag típusa (RTMP message type).
+pub const AUDIO_TAG: u8 = 0x08;
+
+/// AAC sequence header (AudioSpecificConfig) FLV audio-törzse.
+///
+/// 0xAF = hangformátum 10 (AAC), 44 kHz, 16 bit, sztereó;
+/// 0x00 = AAC sequence header. (Az igazi mintavételi rátát az
+/// AudioSpecificConfig hordozza, ezért az FLV mező mindig 44 kHz.)
+pub fn aac_sequence_header(config: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + config.len());
+    out.push(0xAF);
+    out.push(0x00);
+    out.extend_from_slice(config);
+    out
+}
+
+/// Egy AAC frame FLV audio-törzse (nyers AAC packet).
+pub fn aac_frame(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + data.len());
+    out.push(0xAF);
+    out.push(0x01);
+    out.extend_from_slice(data);
+    out
+}
+
 /// AVCDecoderConfigurationRecord (az avcC doboz) SPS-ből és PPS-ből.
 ///
 /// Ez a H.264 konfigurációs rekord, amit a lejátszó a dekóder inicializálásához
@@ -81,6 +106,15 @@ mod tests {
 
         let i = avc_frame(&nals, false, 0);
         assert_eq!(i[0], 0x27);
+    }
+
+    #[test]
+    fn aac_tags_layout() {
+        let asc = [0x11u8, 0x90];
+        let h = aac_sequence_header(&asc);
+        assert_eq!(h, vec![0xAF, 0x00, 0x11, 0x90]);
+        let f = aac_frame(&[0x21, 0x10, 0x05]);
+        assert_eq!(f, vec![0xAF, 0x01, 0x21, 0x10, 0x05]);
     }
 
     #[test]

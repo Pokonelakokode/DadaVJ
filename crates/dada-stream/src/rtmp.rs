@@ -26,9 +26,22 @@ pub struct VideoFrame {
     pub pts_ms: u64,
 }
 
+/// Egy kimenő audio-frame, már FLV/AAC csomagolással.
+#[derive(Debug, Clone)]
+pub struct AudioFrame {
+    pub data: Vec<u8>,
+    pub pts_ms: u64,
+}
+
+enum Outgoing {
+    Video(VideoFrame),
+    Audio(AudioFrame),
+}
+
 #[derive(Debug, Default)]
 struct Stats {
     sent: AtomicU64,
+    audio_sent: AtomicU64,
     dropped: AtomicU64,
     bytes: AtomicU64,
     connected: AtomicBool,
@@ -39,6 +52,7 @@ struct Stats {
 #[derive(Debug, Clone, Default)]
 pub struct StatsSnapshot {
     pub sent: u64,
+    pub audio_sent: u64,
     pub dropped: u64,
     pub bytes: u64,
     pub connected: bool,
@@ -47,7 +61,7 @@ pub struct StatsSnapshot {
 
 /// RTMP publikáló: háttérszál + korlátos csatorna.
 pub struct RtmpPublisher {
-    tx: Option<SyncSender<VideoFrame>>,
+    tx: Option<SyncSender<Outgoing>>,
     stats: Arc<Stats>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -55,7 +69,7 @@ pub struct RtmpPublisher {
 impl RtmpPublisher {
     /// Kapcsolódás és a publikálás megkezdése (a háttérszálon).
     pub fn start(url: &str) -> Result<Self> {
-        let (tx, rx) = sync_channel::<VideoFrame>(8);
+        let (tx, rx) = sync_channel::<Outgoing>(16);
         let stats = Arc::new(Stats::default());
         let stats2 = Arc::clone(&stats);
         let url = url.to_string();
@@ -73,8 +87,17 @@ impl RtmpPublisher {
     /// Egy frame beillesztése. Ha a hálózat lassabb, a frame **eldobódik**
     /// (élő adásnál nem érdemes várni).
     pub fn send(&self, frame: VideoFrame) {
+        self.push(Outgoing::Video(frame));
+    }
+
+    /// Egy hang-frame beillesztése (FLV/AAC csomagolással).
+    pub fn send_audio(&self, frame: AudioFrame) {
+        self.push(Outgoing::Audio(frame));
+    }
+
+    fn push(&self, outgoing: Outgoing) {
         if let Some(tx) = &self.tx {
-            match tx.try_send(frame) {
+            match tx.try_send(outgoing) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
                     self.stats.dropped.fetch_add(1, Ordering::SeqCst);
@@ -87,6 +110,7 @@ impl RtmpPublisher {
     pub fn stats(&self) -> StatsSnapshot {
         StatsSnapshot {
             sent: self.stats.sent.load(Ordering::SeqCst),
+            audio_sent: self.stats.audio_sent.load(Ordering::SeqCst),
             dropped: self.stats.dropped.load(Ordering::SeqCst),
             bytes: self.stats.bytes.load(Ordering::SeqCst),
             connected: self.stats.connected.load(Ordering::SeqCst),
@@ -134,7 +158,7 @@ fn parse_url(url: &str) -> Result<(String, u16, String, String)> {
     Ok((host, port, app.to_string(), key.to_string()))
 }
 
-fn run(url: &str, rx: Receiver<VideoFrame>, stats: &Stats) {
+fn run(url: &str, rx: Receiver<Outgoing>, stats: &Stats) {
     if let Err(e) = run_inner(url, rx, stats) {
         log::error!("RTMP hiba: {e:#}");
         if let Ok(mut slot) = stats.error.lock() {
@@ -153,7 +177,7 @@ fn write_results(stream: &mut TcpStream, results: Vec<ClientSessionResult>) -> R
     Ok(())
 }
 
-fn run_inner(url: &str, rx: Receiver<VideoFrame>, stats: &Stats) -> Result<()> {
+fn run_inner(url: &str, rx: Receiver<Outgoing>, stats: &Stats) -> Result<()> {
     let (host, port, app, key) = parse_url(url)?;
     let mut stream = TcpStream::connect((host.as_str(), port))
         .with_context(|| format!("nem lehet kapcsolódni: {host}:{port}"))?;
@@ -218,12 +242,24 @@ fn run_inner(url: &str, rx: Receiver<VideoFrame>, stats: &Stats) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_millis(2)))?;
     loop {
         match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(frame) => {
-                let ts = RtmpTimestamp::new((frame.pts_ms % (1u64 << 32)) as u32);
-                let result = session.publish_video_data(Bytes::from(frame.data), ts, false)?;
+            Ok(outgoing) => {
+                let (data, pts_ms, is_audio) = match outgoing {
+                    Outgoing::Video(f) => (f.data, f.pts_ms, false),
+                    Outgoing::Audio(f) => (f.data, f.pts_ms, true),
+                };
+                let ts = RtmpTimestamp::new((pts_ms % (1u64 << 32)) as u32);
+                let result = if is_audio {
+                    session.publish_audio_data(Bytes::from(data), ts, false)?
+                } else {
+                    session.publish_video_data(Bytes::from(data), ts, false)?
+                };
                 if let ClientSessionResult::OutboundResponse(packet) = result {
                     stream.write_all(&packet.bytes)?;
-                    stats.sent.fetch_add(1, Ordering::SeqCst);
+                    if is_audio {
+                        stats.audio_sent.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        stats.sent.fetch_add(1, Ordering::SeqCst);
+                    }
                     stats.bytes.fetch_add(packet.bytes.len() as u64, Ordering::SeqCst);
                 }
             }

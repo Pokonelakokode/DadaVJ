@@ -25,6 +25,65 @@ use anyhow::{bail, Result};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// AAC encoder-ellenőrzés: szinusz -> AAC packetek.
+pub async fn aac_check(_args: &Args) -> Result<()> {
+    use dada_media::macos::aac::AacEncoder;
+
+    let rate = 48000.0f64;
+    let secs = 1.0f64;
+    let frames = (rate * secs) as usize;
+    // Fehér zaj (determinisztikus LCG): ez nem tömöríthető, így a bitráta
+    // tényleg megmutatkozik. (A tiszta szinusz 30 kbps-ből is kijön.)
+    let mut pcm = Vec::with_capacity(frames * 2);
+    let mut seed: u32 = 0x1234_5678;
+    for _ in 0..frames {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let s = ((seed >> 8) as f32 / 8_388_608.0 - 1.0) * 0.35;
+        pcm.push(s);
+        pcm.push(s);
+    }
+    println!("AAC-CHECK — {rate} Hz sztereó, {secs} s fehér zaj, 128 kbps cél");
+
+    let mut enc = AacEncoder::new(rate, 2, 128_000)?;
+    let t0 = std::time::Instant::now();
+    let packets = enc.encode(&pcm)?;
+    let dt = t0.elapsed();
+    let total: usize = packets.iter().map(|p| p.len()).sum();
+    let asc = enc.audio_specific_config().to_vec();
+    let avg = if packets.is_empty() {
+        0
+    } else {
+        total / packets.len()
+    };
+    println!(
+        "  {} packet / {:.0} ms ({:.0}x valós idő) · {} bájt ({} B/packet, átlag)",
+        packets.len(),
+        dt.as_secs_f64() * 1000.0,
+        secs / dt.as_secs_f64(),
+        total,
+        avg
+    );
+    println!(
+        "  AudioSpecificConfig: {:02X?} ({} bájt) · első packetek: {:?}",
+        asc,
+        asc.len(),
+        packets.iter().take(3).map(|p| p.len()).collect::<Vec<_>>()
+    );
+    // 48000 elvárt bitráta -> 1 s alatt ~16000 bájt; 1024-es frame-ek -> ~47 packet
+    if asc.len() != 2 || asc[0] != 0x11 || asc[1] != 0x90 {
+        bail!("az AudioSpecificConfig nem a várt 48k sztereó AAC-LC: {asc:02X?}");
+    }
+    if packets.len() < 40 || packets.len() > 60 {
+        bail!("a packet-szám nem a várt ~47: {}", packets.len());
+    }
+    let secs_bytes = total as f64 / secs;
+    if !(9_000.0..22_000.0).contains(&secs_bytes) {
+        bail!("a bájt/másodperc nem a várt ~16000 (128 kbps): {secs_bytes:.0}");
+    }
+    println!("  OK: valódi AAC-LC, érvényes AudioSpecificConfig-gal.");
+    Ok(())
+}
+
 /// Az encoder önálló validációja: CPU-töltött képek -> hardveres H.264.
 pub async fn encode_check(_args: &Args) -> Result<()> {
     use dada_media::macos::encoder::VideoEncoder;

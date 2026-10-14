@@ -78,6 +78,8 @@ pub struct Args {
     pub link_status: bool,
     /// Thumbnail készítése egy videóból (headless ellenőrzés).
     pub thumb_check: Option<String>,
+    /// AAC encoder-ellenőrzés (headless).
+    pub aac_check: bool,
     /// Az encoder önálló validációja (headless).
     pub encode_check: bool,
     /// Beépített web-szerver (vezérlő UI + MJPEG előnézet).
@@ -122,6 +124,7 @@ impl Default for Args {
             link: false,
             link_status: false,
             thumb_check: None,
+            aac_check: false,
             encode_check: false,
             serve: false,
             port: 7777,
@@ -191,6 +194,7 @@ impl Args {
                 "--link" => args.link = true,
                 "--link-status" => args.link_status = true,
                 "--thumb-check" => args.thumb_check = it.next(),
+                "--aac-check" => args.aac_check = true,
                 "--encode-check" => args.encode_check = true,
                 "--project" => args.project = it.next(),
                 "--save" => args.save = it.next(),
@@ -240,6 +244,11 @@ fn main() -> Result<()> {
     // Egy videófájl vizsgálata.
     if let Some(path) = args.probe.clone() {
         return pollster::block_on(bench::probe(&path));
+    }
+
+    // AAC encoder-ellenőrzés.
+    if args.aac_check {
+        return pollster::block_on(bench::aac_check(&args));
     }
 
     // Thumbnail-ellenőrzés.

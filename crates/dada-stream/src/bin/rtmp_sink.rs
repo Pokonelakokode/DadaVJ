@@ -17,8 +17,8 @@ fn main() {
     match serve_once(port, max_tags) {
         Ok(s) => {
             println!(
-                "app={} kulcs={} · {} videó-tag, {} keyframe, {} bájt",
-                s.app_name, s.stream_key, s.video_tags, s.keyframes, s.bytes
+                "app={} kulcs={} · {} videó-tag, {} keyframe, {} audió-tag, {} bájt",
+                s.app_name, s.stream_key, s.video_tags, s.keyframes, s.audio_tags, s.bytes
             );
             if !s.first_tag.is_empty() {
                 println!(

@@ -8,5 +8,8 @@ pub mod flv;
 pub mod rtmp;
 pub mod sink;
 
-pub use flv::{avc_frame, avc_sequence_header, avcc_from_sps_pps, VIDEO_TAG};
+pub use flv::{
+    aac_frame, aac_sequence_header, avc_frame, avc_sequence_header, avcc_from_sps_pps, AUDIO_TAG,
+    VIDEO_TAG,
+};
 pub use rtmp::{RtmpPublisher, StatsSnapshot, VideoFrame};

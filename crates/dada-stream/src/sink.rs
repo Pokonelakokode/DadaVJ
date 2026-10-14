@@ -17,6 +17,7 @@ pub struct SinkStats {
     pub app_name: String,
     pub stream_key: String,
     pub video_tags: u64,
+    pub audio_tags: u64,
     pub keyframes: u64,
     pub bytes: u64,
     /// Az első videó-tag (a sequence header).
@@ -112,6 +113,10 @@ pub fn serve_one(stream: TcpStream, max_tags: u64) -> Result<SinkStats> {
                         if let Ok(res) = session.accept_request(request_id) {
                             write_results(stream, res);
                         }
+                    }
+                    ServerSessionEvent::AudioDataReceived { data, .. } => {
+                        stats.audio_tags += 1;
+                        stats.bytes += data.len() as u64;
                     }
                     ServerSessionEvent::VideoDataReceived { data, .. } => {
                         if stats.video_tags == 0 {
