@@ -12,7 +12,7 @@ use dada_core::{
     Autopilot, AutopilotMode, BlendMode, Clip, ClipSource, Deck, DeckEvent, Mixer, Quantize,
 };
 use dada_midi::{EnvelopeSpec, Mapping, MidiEngine, Trigger};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use std::sync::Arc;
 use std::time::Instant;
@@ -26,7 +26,8 @@ pub struct App {
     args: Args,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    video: Option<VideoLayer>,
+    /// Deck-enként egy videó-réteg (a mixer.decks-cel párhuzamosan).
+    videos: Vec<Option<VideoLayer>>,
     audio: Option<(AudioEngine, AudioVisual)>,
     shader: Option<Effect>,
     mixer: Option<Mixer>,
@@ -55,7 +56,7 @@ impl App {
             args,
             window: None,
             renderer: None,
-            video: None,
+            videos: Vec::new(),
             audio: None,
             shader: None,
             mixer: None,
@@ -119,8 +120,10 @@ impl App {
                     if let (Some((path, name)), Some(device)) = (next, device.as_ref()) {
                         match VideoLayer::open(device, std::path::Path::new(&path), 1.0) {
                             Ok(video) => {
-                                log::info!("clip váltás -> {name} (beat {at_beat:.2})");
-                                self.video = Some(video);
+                                log::info!("deck {deck} váltás -> {name} (beat {at_beat:.2})");
+                                if deck < self.videos.len() {
+                                    self.videos[deck] = Some(video);
+                                }
                             }
                             Err(e) => log::error!("a klip nem nyitható meg: {e:#}"),
                         }
@@ -134,16 +137,17 @@ impl App {
         };
         let device = renderer.device().clone();
         let now = Instant::now();
-        let video_view = match self.video.as_mut() {
-            Some(video) => match video.advance(&device, now) {
-                Ok(view) => view,
-                Err(e) => {
-                    log::error!("videó hiba: {e:#}");
-                    None
+        // Deck-enkénti videó-rétegek előkészítése (tulajdonolt view handle).
+        let mut video_views: Vec<(usize, wgpu::TextureView)> = Vec::new();
+        for (i, slot) in self.videos.iter_mut().enumerate() {
+            if let Some(video) = slot.as_mut() {
+                match video.advance(&device, now) {
+                    Ok(Some(view)) => video_views.push((i, view)),
+                    Ok(None) => {}
+                    Err(e) => log::error!("videó hiba (deck {i}): {e:#}"),
                 }
-            },
-            None => None,
-        };
+            }
+        }
         // MIDI: hardveres byte-ok átvétele, clock, envelope-ok léptetése.
         if let Some(midi) = self.midi.as_mut() {
             midi.tick(t as f64, dt_ms as f32 / 1000.0);
@@ -182,7 +186,7 @@ impl App {
         let mut layers: Vec<LayerRef> = Vec::new();
 
         // Egyedüli rétegként teljes opacity, együtt a beállított értékek.
-        let active_count = video_view.is_some() as usize
+        let active_count = video_views.len()
             + self.shader.is_some() as usize
             + self.audio.is_some() as usize;
         let single = active_count <= 1;
@@ -190,14 +194,22 @@ impl App {
         let shader_opacity = if single { 1.0 } else { self.shader_opacity };
         let audio_opacity = if single { 1.0 } else { self.audio_opacity };
 
-        // 1. Videó-réteg (deck) — Normal.
-        if let Some(view) = video_view {
-            let bind_group = renderer.make_video_bind_group(view);
-            renderer.set_video_opacity(renderer.queue(), video_opacity);
-            layers.push(LayerRef {
-                pipeline: renderer.video_pipeline(BlendMode::Normal).clone(),
-                bind_group,
-            });
+        // 1. Videó-rétegek (deck-enként, saját blend/opacity).
+        for (deck_index, view) in &video_views {
+            let (blend, opacity) = self
+                .mixer
+                .as_ref()
+                .and_then(|m| m.decks.get(*deck_index))
+                .map(|d| (d.blend, d.opacity))
+                .unwrap_or((BlendMode::Normal, video_opacity));
+            if let Some(video) = self.videos.get(*deck_index).and_then(|s| s.as_ref()) {
+                video.set_opacity(renderer.queue(), opacity);
+                let bind_group = renderer.make_video_bind_group(view, video.params_buffer());
+                layers.push(LayerRef {
+                    pipeline: renderer.video_pipeline(blend).clone(),
+                    bind_group,
+                });
+            }
         }
 
         // 2. ISF shader réteg — Add.
@@ -332,17 +344,24 @@ impl App {
                 }
                 None => (String::new(), Vec::new()),
             };
-            let layer_name = if self.shader.is_some() {
+            let layer_name = if self.mixer.is_some() {
+                "deck"
+            } else if self.shader.is_some() {
                 "shader"
             } else if self.audio.is_some() {
                 "audio"
-            } else if self.video.is_some() {
-                "video"
             } else {
                 "teszt"
             };
+            let active_clips: Vec<Option<usize>> = self
+                .mixer
+                .as_ref()
+                .map(|m| m.decks.iter().map(|d| d.active).collect())
+                .unwrap_or_default();
             let state = serde_json::json!({
                 "fps": self.last_fps,
+                "decks": self.videos.len(),
+                "active_clips": active_clips,
                 "bpm": bpm,
                 "beats": beats,
                 "midi_messages": midi_msgs,
@@ -390,6 +409,23 @@ impl App {
     }
 }
 
+/// Videófájlok felkutatása egy mappában.
+fn scan_videos(path: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(path)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    matches!(
+                        p.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()),
+                        Some(ref s) if matches!(s.as_str(), "mp4" | "mov" | "m4v" | "mkv")
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -409,21 +445,6 @@ impl ApplicationHandler for App {
         log::info!("ablak létrehozva: {:?}", window.inner_size());
         let renderer = pollster::block_on(Renderer::new_surface(window.clone(), self.args.vsync))
             .expect("nem sikerült a renderert inicializálni");
-        if let Some(path) = self.args.video.clone() {
-            match VideoLayer::open(renderer.device(), std::path::Path::new(&path), 1.0) {
-                Ok(layer) => {
-                    log::info!(
-                        "videó-réteg: {} ({}x{}, {:.2} fps névleges)",
-                        path,
-                        layer.size.0,
-                        layer.size.1,
-                        layer.nominal_fps()
-                    );
-                    self.video = Some(layer);
-                }
-                Err(e) => log::error!("a videó nem nyitható meg: {e:#}"),
-            }
-        }
         if self.args.audio_visual {
             let dev = self.args.audio_device.as_deref();
             let engine = match dev {
@@ -475,25 +496,42 @@ impl ApplicationHandler for App {
                 Err(e) => log::error!("a shader nem tölthető be: {e:#}"),
             }
         }
-        if let Some(folder) = self.args.deck.clone() {
+        // Deckek felépítése: --video (egy klip) vagy --deck (mappa[:ütem[:blend]]).
+        let mut specs: Vec<(PathBuf, Vec<PathBuf>, f64, BlendMode)> = Vec::new();
+        if let Some(path) = self.args.video.clone() {
+            let p = PathBuf::from(&path);
+            let parent = p
+                .parent()
+                .map(|d| d.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            specs.push((parent, vec![p], 0.0, BlendMode::Normal));
+        }
+        for spec in &self.args.decks {
+            let mut parts = spec.split(':');
+            let folder = parts.next().unwrap_or(".").to_string();
+            let beats: f64 = parts
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(self.args.autopilot_beats);
+            let blend = match parts.next() {
+                Some("add") => BlendMode::Add,
+                Some("screen") => BlendMode::Screen,
+                Some("multiply") => BlendMode::Multiply,
+                _ => BlendMode::Normal,
+            };
             let path = PathBuf::from(&folder);
-            let mut names: Vec<PathBuf> = std::fs::read_dir(&path)
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok())
-                        .map(|e| e.path())
-                        .filter(|p| {
-                            matches!(
-                                p.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()),
-                                Some(ref s) if matches!(s.as_str(), "mp4" | "mov" | "m4v" | "mkv")
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let mut names = scan_videos(&path);
             names.sort();
-            if names.is_empty() {
-                log::error!("nincs videó a mappában: {folder}");
-            } else {
+            specs.push((path, names, beats, blend));
+        }
+        if !specs.is_empty() {
+            let mut mixer = Mixer::new(specs.len());
+            for (i, (folder, names, beats, blend)) in specs.iter().enumerate() {
+                if names.is_empty() {
+                    log::error!("nincs videó a mappában: {}", folder.display());
+                    self.videos.push(None);
+                    continue;
+                }
                 let clips: Vec<Clip> = names
                     .iter()
                     .map(|p| {
@@ -506,39 +544,47 @@ impl ApplicationHandler for App {
                         )
                     })
                     .collect();
-                log::info!(
-                    "clip-bank: {} klip a(z) {} mappából (autopilot: {:.0} ütem, {:?})",
-                    clips.len(),
-                    folder,
-                    self.args.autopilot_beats,
-                    Quantize::Beat
-                );
-                let mut mixer = Mixer::new(1);
-                let mut deck = Deck::new("A", clips);
+                let name = ((b'A' + i as u8) as char).to_string();
+                let mut deck = Deck::new(name.clone(), clips);
+                deck.blend = *blend;
+                deck.opacity = if i == 0 { 1.0 } else { 0.85 };
+                deck.fade_beats = 0.0;
                 deck.autopilot = Autopilot {
-                    mode: AutopilotMode::Sequential,
-                    every_beats: self.args.autopilot_beats,
+                    mode: if *beats > 0.0 {
+                        AutopilotMode::Sequential
+                    } else {
+                        AutopilotMode::Off
+                    },
+                    every_beats: *beats,
                     quantize: Quantize::Beat,
                     next_change: None,
                 };
-                deck.fade_beats = 0.0;
-                mixer.decks[0] = deck;
-                // Az első klip azonnali betöltése.
-                let first = names[0].clone();
-                match VideoLayer::open(renderer.device(), &first, 1.0) {
+                match VideoLayer::open(renderer.device(), &names[0], 1.0) {
                     Ok(layer) => {
-                        log::info!("első klip: {}", first.display());
-                        self.video = Some(layer);
-                        mixer.decks[0].active = Some(0);
-                        if let Some(ap) = mixer.decks[0].autopilot.next_change.as_mut() {
-                            *ap = 0.0;
-                        }
+                        log::info!(
+                            "deck {name}: {} klip, autopilot {}, blend {:?}, {}x{}",
+                            names.len(),
+                            if *beats > 0.0 {
+                                format!("{beats:.0} ütem")
+                            } else {
+                                "ki".to_string()
+                            },
+                            blend,
+                            layer.size.0,
+                            layer.size.1
+                        );
+                        self.videos.push(Some(layer));
+                        deck.active = Some(0);
                     }
-                    Err(e) => log::error!("a klip nem nyitható meg: {e:#}"),
+                    Err(e) => {
+                        log::error!("a klip nem nyitható meg: {e:#}");
+                        self.videos.push(None);
+                    }
                 }
-                self.mixer = Some(mixer);
-                self.deck_folder = Some(path);
+                mixer.decks[i] = deck;
             }
+            self.mixer = Some(mixer);
+            self.deck_folder = specs.first().map(|s| s.0.clone());
         }
         if self.args.serve {
             let shared = WebShared::new();

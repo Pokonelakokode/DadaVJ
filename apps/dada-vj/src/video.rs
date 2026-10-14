@@ -21,6 +21,8 @@ pub struct VideoLayer {
     ring: VecDeque<WrappedFrame>,
     current_view: Option<wgpu::TextureView>,
     pending: Option<Frame>,
+    /// A réteg opacity-ja (16 bájtos uniform, binding 2).
+    params_buf: wgpu::Buffer,
     local_start: Instant,
     pub speed: f64,
     pub frames_shown: u64,
@@ -35,6 +37,12 @@ impl VideoLayer {
             .with_context(|| format!("videó megnyitása: {}", path.display()))?;
         let cache = MetalTextureCache::new(device)?;
         let size = (reader.width(), reader.height());
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("video-layer-params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Ok(Self {
             path: path.to_path_buf(),
             reader,
@@ -42,6 +50,7 @@ impl VideoLayer {
             ring: VecDeque::with_capacity(RING),
             current_view: None,
             pending: None,
+            params_buf,
             local_start: Instant::now(),
             speed,
             frames_shown: 0,
@@ -59,6 +68,17 @@ impl VideoLayer {
         &self.path
     }
 
+    /// A réteg opacity-puffere (a bind group binding 2-höz).
+    pub fn params_buffer(&self) -> &wgpu::Buffer {
+        &self.params_buf
+    }
+
+    /// A réteg átlátszóságának beállítása.
+    pub fn set_opacity(&self, queue: &wgpu::Queue, opacity: f32) {
+        let data: [f32; 4] = [opacity, 0.0, 0.0, 0.0];
+        queue.write_buffer(&self.params_buf, 0, bytemuck::cast_slice(&data));
+    }
+
     /// A következő megjelenítendő frame előállítása az eltelt időhöz igazítva.
     ///
     /// Addig dekódol, amíg a frame PTS-e meg nem haladja a célidőt; így a videó
@@ -67,7 +87,7 @@ impl VideoLayer {
         &mut self,
         device: &wgpu::Device,
         now: Instant,
-    ) -> Result<Option<&wgpu::TextureView>> {
+    ) -> Result<Option<wgpu::TextureView>> {
         let target = (now - self.local_start).as_secs_f64() * self.speed;
         if self.pending.is_none() {
             self.fetch_next(now)?;
@@ -90,7 +110,9 @@ impl VideoLayer {
                 break;
             }
         }
-        Ok(self.current_view.as_ref())
+        // Tulajdonolt handle-t adunk vissza (Clone), hogy a hívó ne maradjon
+        // kölcsönzésben, és több réteget is össze tudjon fűzni.
+        Ok(self.current_view.clone())
     }
 
     fn fetch_next(&mut self, now: Instant) -> Result<()> {

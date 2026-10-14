@@ -416,8 +416,12 @@ pub async fn video_check(args: &Args) -> Result<()> {
         let now = start + Duration::from_secs_f64(i as f64 / 60.0);
         let view = video.advance(renderer.device(), now)?;
         if let Some(view) = view {
-            let bind_group = renderer.make_video_bind_group(view);
-            renderer.set_video_opacity(renderer.queue(), 1.0);
+            let params = renderer.create_layer_params();
+            let data: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+            renderer
+                .queue()
+                .write_buffer(&params, 0, bytemuck::cast_slice(&data));
+            let bind_group = renderer.make_video_bind_group(&view, &params);
             let layers = [LayerRef {
                 pipeline: renderer.video_pipeline(BlendMode::Normal).clone(),
                 bind_group,

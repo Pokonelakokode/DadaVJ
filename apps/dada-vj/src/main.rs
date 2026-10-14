@@ -46,8 +46,9 @@ pub struct Args {
     pub midi_visual: bool,
     /// Automatikus MIDI-validáció (szintetikus clock + note stream, headless).
     pub midi_check: bool,
-    /// Videó-mappa mint clip-bank, autopilottal.
-    pub deck: Option<String>,
+    /// Videó-mappák mint clip-bankok: --deck MAPPA[:UTEM[:BLEND]]
+    /// Többször megadva több deck (layer) lesz.
+    pub decks: Vec<String>,
     /// Az autopilot váltás hossza ütemekben.
     pub autopilot_beats: f64,
     /// Beépített web-szerver (vezérlő UI + MJPEG előnézet).
@@ -76,7 +77,7 @@ impl Default for Args {
             midi: false,
             midi_visual: false,
             midi_check: false,
-            deck: None,
+            decks: Vec::new(),
             autopilot_beats: 16.0,
             serve: false,
             port: 7777,
@@ -123,7 +124,11 @@ impl Args {
                     args.midi_visual = true;
                 }
                 "--midi-check" => args.midi_check = true,
-                "--deck" => args.deck = it.next(),
+                "--deck" => {
+                    if let Some(v) = it.next() {
+                        args.decks.push(v);
+                    }
+                }
                 "--autopilot" => {
                     let v = it.next().unwrap_or_else(|| "16".into());
                     args.autopilot_beats = v.parse()?;
@@ -138,7 +143,7 @@ impl Args {
                 "--fullscreen" => args.fullscreen = true,
                 "-h" | "--help" => {
                     println!(
-                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --midi              MIDI-bemenetek megnyitása (több forrás egyszerre)\n  --midi-visual       MIDI note -> envelope -> shader paraméter\n  --midi-check        automatikus MIDI-validáció (headless)\n  --deck MAPPA        videó-mappa mint clip-bank, autopilottal\n  --autopilot N       autopilot váltás N ütem után (alap: 16)\n  --serve             webes vezérlő UI + MJPEG előnézet (127.0.0.1:7777)\n  --port N            a web-szerver portja\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
+                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --midi              MIDI-bemenetek megnyitása (több forrás egyszerre)\n  --midi-visual       MIDI note -> envelope -> shader paraméter\n  --midi-check        automatikus MIDI-validáció (headless)\n  --deck MAPPA[:UTEM[:BLEND]]  videó-mappa mint clip-bank (többször ismételhető)\n  --autopilot N       autopilot váltás N ütem után (alap: 16)\n  --serve             webes vezérlő UI + MJPEG előnézet (127.0.0.1:7777)\n  --port N            a web-szerver portja\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
                         env!("CARGO_PKG_VERSION")
                     );
                     std::process::exit(0);

@@ -280,19 +280,22 @@ impl Renderer {
         &self.queue
     }
 
-    /// A videó-réteg opacity-puffere (16 bájt, minden videó-réteg közös).
-    pub fn video_params_buffer(&self) -> &wgpu::Buffer {
-        &self.video_params
-    }
-
-    /// A videó-réteg opacity-jének beállítása.
-    pub fn set_video_opacity(&self, queue: &wgpu::Queue, opacity: f32) {
-        let data: [f32; 4] = [opacity, 0.0, 0.0, 0.0];
-        queue.write_buffer(&self.video_params, 0, bytemuck::cast_slice(&data));
+    /// Egy 16 bájtos layer-params puffer létrehozása (opacity).
+    pub fn create_layer_params(&self) -> wgpu::Buffer {
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("layer-params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
     }
 
     /// Bind group egy videó-frame textúrához (textúra + sampler + opacity).
-    pub fn make_video_bind_group(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
+    pub fn make_video_bind_group(
+        &self,
+        view: &wgpu::TextureView,
+        params: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("video-frame"),
             layout: &self.video_bgl,
@@ -307,7 +310,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.video_params.as_entire_binding(),
+                    resource: params.as_entire_binding(),
                 },
             ],
         })
