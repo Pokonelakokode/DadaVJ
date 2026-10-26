@@ -1,0 +1,44 @@
+/*{
+    "DESCRIPTION": "VHS / CRT TV — szalagtorzítás, képcső-görbület, színvérzés és zaj",
+    "CREDIT": "Dada VJ",
+    "ISFVSN": "2",
+    "CATEGORIES": [ "Effect" ],
+    "INPUTS": [
+        { "NAME": "inputImage", "TYPE": "image" },
+        { "NAME": "distortion", "TYPE": "float", "DEFAULT": 0.25, "MIN": 0.0, "MAX": 1.0 },
+        { "NAME": "curvature", "TYPE": "float", "DEFAULT": 0.2, "MIN": 0.0, "MAX": 1.0 },
+        { "NAME": "color_bleed", "TYPE": "float", "DEFAULT": 0.015, "MIN": 0.0, "MAX": 0.08 },
+        { "NAME": "noise", "TYPE": "float", "DEFAULT": 0.12, "MIN": 0.0, "MAX": 1.0 },
+        { "NAME": "vignette", "TYPE": "float", "DEFAULT": 0.4, "MIN": 0.0, "MAX": 1.0 }
+    ]
+}*/
+
+float rand(vec2 co) {
+    return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+void main() {
+    vec2 uv = isf_FragNormCoord;
+    vec2 c = uv * 2.0 - 1.0;
+    c *= 1.0 + dot(c, c) * curvature * 0.25;
+    uv = c * 0.5 + 0.5;
+
+    // VHS szalag hullámzás
+    float wave = sin(uv.y * 12.0 + TIME * 6.0) * 0.008 * distortion;
+    float bar = smoothstep(0.92, 1.0, sin(uv.y * 3.0 - TIME * 2.2)) * 0.04 * distortion;
+    uv.x += wave + bar;
+
+    vec2 cl = clamp(uv, 0.0, 1.0);
+    float r = texture2D(inputImage, clamp(cl + vec2(color_bleed, 0.0), 0.0, 1.0)).r;
+    float g = texture2D(inputImage, cl).g;
+    float b = texture2D(inputImage, clamp(cl - vec2(color_bleed, 0.0), 0.0, 1.0)).b;
+
+    vec3 col = vec3(r, g, b);
+    float n = (rand(uv + fract(TIME)) - 0.5) * noise;
+    col += n;
+
+    // Scanline + Vignette
+    float scan = 0.9 + 0.1 * sin(uv.y * RENDERSIZE.y * 1.4);
+    float vig = 1.0 - vignette * dot(c, c) * 0.6;
+    gl_FragColor = vec4(clamp(col * scan * vig, 0.0, 1.0), 1.0);
+}

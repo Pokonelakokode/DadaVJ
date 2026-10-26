@@ -1,0 +1,37 @@
+/*{
+    "DESCRIPTION": "Pixelizálás & Neon Élkiemelés — mozaik és világító kontúrok",
+    "CREDIT": "Dada VJ",
+    "ISFVSN": "2",
+    "CATEGORIES": [ "Effect" ],
+    "INPUTS": [
+        { "NAME": "inputImage", "TYPE": "image" },
+        { "NAME": "pixel_size", "TYPE": "float", "DEFAULT": 1.0, "MIN": 1.0, "MAX": 64.0 },
+        { "NAME": "edge_strength", "TYPE": "float", "DEFAULT": 1.5, "MIN": 0.0, "MAX": 5.0 },
+        { "NAME": "base_mix", "TYPE": "float", "DEFAULT": 0.7, "MIN": 0.0, "MAX": 1.0 },
+        { "NAME": "edge_color", "TYPE": "color", "DEFAULT": [ 0.0, 1.0, 0.85, 1.0 ] }
+    ]
+}*/
+
+float luma(vec3 c) {
+    return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+void main() {
+    vec2 res = max(RENDERSIZE, vec2(1.0));
+    vec2 uv = isf_FragNormCoord;
+    if (pixel_size > 1.05) {
+        vec2 grid = res / pixel_size;
+        uv = (floor(uv * grid) + 0.5) / grid;
+    }
+
+    vec2 step_uv = pixel_size / res;
+    vec3 center = texture2D(inputImage, clamp(uv, 0.0, 1.0)).rgb;
+    float l_r = luma(texture2D(inputImage, clamp(uv + vec2(step_uv.x, 0.0), 0.0, 1.0)).rgb);
+    float l_l = luma(texture2D(inputImage, clamp(uv - vec2(step_uv.x, 0.0), 0.0, 1.0)).rgb);
+    float l_u = luma(texture2D(inputImage, clamp(uv + vec2(0.0, step_uv.y), 0.0, 1.0)).rgb);
+    float l_d = luma(texture2D(inputImage, clamp(uv - vec2(0.0, step_uv.y), 0.0, 1.0)).rgb);
+
+    float edge = length(vec2(l_r - l_l, l_u - l_d)) * edge_strength * 2.5;
+    vec3 out_col = center * base_mix + edge_color.rgb * clamp(edge, 0.0, 1.5);
+    gl_FragColor = vec4(clamp(out_col, 0.0, 1.0), 1.0);
+}

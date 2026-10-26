@@ -285,6 +285,15 @@ mod tests {
     }
 
     #[test]
+    fn seek_at_past_timestamp_keeps_elapsed_phase() {
+        let mut tr = Transport::new(120.0);
+        tr.play(10.0);
+        // A gombnyomás 250 ms-mal korábban történt: onnantól beat 0.
+        tr.seek(0.0, 10.25);
+        assert!((tr.beats_at(10.5) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
     fn transport_advances_with_tempo() {
         let mut tr = Transport::new(120.0);
         tr.seek(0.0, 100.0);

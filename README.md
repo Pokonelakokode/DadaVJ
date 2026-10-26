@@ -3,7 +3,7 @@
 Saját, Mac-re optimalizált VJ program. Részletes terv: [TERV.md](TERV.md).
 
 **Állapot: Phase 0 ✅ · Phase 1 ✅ · Phase 2 (streamelés/polish) — nagyrészt kész.**
-Húsz dokumentum a [docs/](docs/)-ban, 20 teszt-csoport zöld.
+Huszonegy dokumentum a [docs/](docs/)-ban, 20 teszt-csoport zöld.
 
 ## Felépítés
 
@@ -37,14 +37,16 @@ cargo test
 |---|---|
 | Render | 4 réteg 1080p-n, 59.7 fps vsync mellett, CPU 6% |
 | Clip-bank | N deck, mappából, thumbnailekkel a UI-ban |
-| Indítás | kvantált beat-indítás, autopilot (sequential/shuffle/weighted) |
+| Indítás | kvantált beat-indítás, autopilot (sequential/shuffle/weighted), kézi next külön sequential/random |
 | Blend | Normal, Add, Multiply, Screen + réteg-opacity |
+| Chroma key | deckenkénti alap (ArKaOS-stílus) + klippenkénti override (öröklés/egyedi/ki), választható kulcsszín + tolerance/softness/spill, a projektben mentve |
 | Szinkron | MIDI clock (24 PPQN, PLL) és **Ableton Link** |
-| Moduláció | note (envelope), CC, 6 audio-sáv, onset, LFO, clock-fázis -> bármely cél |
+| Moduláció | note (ADSR envelope), CC, 6 audio-sáv, onset, LFO, clock-fázis -> bármely cél |
+| Lejátszás | Loop / Once / Ping-Pong bounce, klipenkénti és deck-szintű BPM-hossz igazítás |
 | Audio | FFT (spektrum, spektrogram, sávok) GPU-textúraként és modulációs forrásként |
-| ISF | generátorok **és effektek** (képi bemenet a lentebbi rétegek) |
-| Web UI | clip-rács előnézettel, autopilot/opacity/blend, mod-szerkesztő, MJPEG előnézet |
-| Felvétel | natív H.264 zero-copy, valós idejű MP4 |
+| ISF | generátorok **és effektek** (képi bemenet a lentebbi rétegek), **színkulcs (chroma key)**, effekt célréteg (legfelső kompozit vagy deck-réteg cseréje) |
+| Web UI | clip-rács, média könyvtár drag&drop, **rétegek drag&drop (Z-sorrend)**, shader célréteg + alpha mód, ADSR + node patch szerkesztő, **gamepad effekt-körbeváltás szettel és deckenkénti következő-klip akciókkal**, MJPEG előnézet |
+| Felvétel | natív H.264 zero-copy, valós idejű MP4, opcionális AAC audióval (választható capture-forrás) |
 | Stream | RTMP (YouTube-kompatibilis), **kép és hang (AAC-LC)**, háttérszálon, frame-eldobással |
 
 ## Használat
@@ -69,6 +71,12 @@ $BIN --project my-set.toml
 
 # ISF effekt a videóra (képi bemenet)
 $BIN --video media/loop.mp4 --shader shaders/mirror.isf
+
+# deckenkénti chroma key: zöld háttér kivétele a Deck kártyán (Chroma key + zöld kulcsszín)
+$BIN --deck "media/hatter:16" --deck "media/zold-hatter:16" --serve
+
+# alternatíva: ISF chroma_key effekt a célrétegen (Shader célréteg + Shader Alpha = shader)
+$BIN --deck "media/hatter:16" --deck "media/zold-hatter:16" --shader shaders/chroma_key.isf --serve
 ```
 
 Kapcsolók:
@@ -97,7 +105,9 @@ $BIN --encode-check                        # hardveres H.264, avcC, keyframe
 $BIN --mod-check                           # note/audio/LFO -> célok
 $BIN --audio-check                         # FFT -> shader -> pixel
 $BIN --shader shaders/plasma.isf --shader-check
+$BIN --chroma-check                        # deckenkénti chroma key (GPU)
 $BIN --video media/loop.mp4 --video-check
+$BIN --video media/loop.mp4 --bounce-check # Ping-Pong reverse lejátszás
 $BIN --midi-check                          # clock -> BPM -> envelope -> pixel
 $BIN --thumb-check media/loop.mp4
 $BIN --probe felvetel.mp4

@@ -5,16 +5,25 @@
 //! renderelhető, CPU-másolás nélkül.
 
 use anyhow::{anyhow, bail, Result};
+use std::ffi::c_void;
 use std::path::Path;
+use std::ptr::NonNull;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_av_foundation::{
     AVAssetWriter, AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor, AVFileTypeMPEG4,
-    AVMediaTypeVideo,
+    AVMediaTypeAudio, AVMediaTypeVideo,
 };
-use objc2_core_foundation::CFRetained;
-use objc2_core_media::{CMTime, CMTimeFlags};
+use objc2_core_audio_types::{
+    kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatFlagsNativeEndian,
+    kAudioFormatLinearPCM, AudioStreamBasicDescription,
+};
+use objc2_core_foundation::{kCFAllocatorDefault, CFRetained};
+use objc2_core_media::{
+    CMAudioFormatDescriptionCreate, CMBlockBuffer, CMFormatDescription, CMSampleBuffer,
+    CMSampleTimingInfo, CMTime, CMTimeFlags,
+};
 use objc2_core_video::{
     kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
     kCVPixelBufferPixelFormatTypeKey, CVPixelBuffer, CVPixelBufferGetBaseAddress,
@@ -54,6 +63,11 @@ pub struct VideoWriter {
     writer: Retained<AVAssetWriter>,
     input: Retained<AVAssetWriterInput>,
     adaptor: Retained<AVAssetWriterInputPixelBufferAdaptor>,
+    audio_input: Option<Retained<AVAssetWriterInput>>,
+    audio_format: Option<CFRetained<CMFormatDescription>>,
+    audio_sample_rate: f64,
+    audio_channels: u32,
+    audio_frames: u64,
     pub size: (u32, u32),
     pub fps: f64,
     pub frames: u64,
@@ -62,6 +76,39 @@ pub struct VideoWriter {
 
 impl VideoWriter {
     pub fn new(path: &Path, width: u32, height: u32, fps: f64, bitrate: u32) -> Result<Self> {
+        Self::new_impl(path, width, height, fps, bitrate, None)
+    }
+
+    /// Felvétel AAC audióval. A PCM mintákat a hívó adja (append_audio),
+    /// az AVAssetWriter kódolja és muxolja a videó mellé.
+    pub fn new_with_audio(
+        path: &Path,
+        width: u32,
+        height: u32,
+        fps: f64,
+        bitrate: u32,
+        sample_rate: f64,
+        channels: u32,
+        audio_bitrate: u32,
+    ) -> Result<Self> {
+        Self::new_impl(
+            path,
+            width,
+            height,
+            fps,
+            bitrate,
+            Some((sample_rate, channels.clamp(1, 2), audio_bitrate)),
+        )
+    }
+
+    fn new_impl(
+        path: &Path,
+        width: u32,
+        height: u32,
+        fps: f64,
+        bitrate: u32,
+        audio: Option<(f64, u32, u32)>,
+    ) -> Result<Self> {
         // A felvevő mindig felülír: a meglévő fájl blokkolhatja az AVAssetWritert.
         if path.exists() {
             let _ = std::fs::remove_file(path);
@@ -133,6 +180,69 @@ impl VideoWriter {
                     Some(&attrs),
                 );
 
+            let mut audio_input: Option<Retained<AVAssetWriterInput>> = None;
+            let mut audio_format: Option<CFRetained<CMFormatDescription>> = None;
+            let mut audio_sample_rate = 0.0f64;
+            let mut audio_channels = 0u32;
+            if let Some((rate, ch, br)) = audio {
+                let key_aid = NSString::from_str("AVFormatIDKey");
+                let key_arate = NSString::from_str("AVSampleRateKey");
+                let key_ach = NSString::from_str("AVNumberOfChannelsKey");
+                let key_abr = NSString::from_str("AVEncoderBitRateKey");
+                let aid = NSNumber::numberWithUnsignedInt(0x6161_6320); // 'aac '
+                let arate = NSNumber::numberWithDouble(rate);
+                let ach = NSNumber::numberWithUnsignedInt(ch);
+                let abr = NSNumber::numberWithUnsignedInt(br);
+                let asettings = dict(
+                    &[&key_aid, &key_arate, &key_ach, &key_abr],
+                    vec![as_any(aid), as_any(arate), as_any(ach), as_any(abr)],
+                );
+                let amedia = AVMediaTypeAudio.ok_or_else(|| anyhow!("nincs AVMediaTypeAudio"))?;
+                let ainput = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
+                    amedia,
+                    Some(&asettings),
+                );
+                ainput.setExpectsMediaDataInRealTime(true);
+                if !writer.canAddInput(&ainput) {
+                    bail!("az AVAssetWriter nem fogadja el az audió-inputot");
+                }
+                writer.addInput(&ainput);
+
+                let asbd = AudioStreamBasicDescription {
+                    mSampleRate: rate,
+                    mFormatID: kAudioFormatLinearPCM,
+                    mFormatFlags: kAudioFormatFlagIsFloat
+                        | kAudioFormatFlagsNativeEndian
+                        | kAudioFormatFlagIsPacked,
+                    mBytesPerPacket: ch * 4,
+                    mFramesPerPacket: 1,
+                    mBytesPerFrame: ch * 4,
+                    mChannelsPerFrame: ch,
+                    mBitsPerChannel: 32,
+                    mReserved: 0,
+                };
+                let mut fmt_ptr: *const CMFormatDescription = std::ptr::null();
+                let status = CMAudioFormatDescriptionCreate(
+                    None,
+                    NonNull::from(&asbd),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null::<c_void>(),
+                    None,
+                    NonNull::new(&mut fmt_ptr).unwrap(),
+                );
+                if status != 0 {
+                    bail!("CMAudioFormatDescriptionCreate: {status}");
+                }
+                let fmt_raw = NonNull::new(fmt_ptr as *mut CMFormatDescription)
+                    .ok_or_else(|| anyhow!("nincs audio format description"))?;
+                audio_format = Some(CFRetained::from_raw(fmt_raw));
+                audio_input = Some(ainput);
+                audio_sample_rate = rate;
+                audio_channels = ch;
+            }
+
             if !writer.startWriting() {
                 let err = writer
                     .error()
@@ -146,6 +256,11 @@ impl VideoWriter {
                 writer,
                 input,
                 adaptor,
+                audio_input,
+                audio_format,
+                audio_sample_rate,
+                audio_channels,
+                audio_frames: 0,
                 size: (width, height),
                 fps,
                 frames: 0,
@@ -263,6 +378,107 @@ impl VideoWriter {
         out
     }
 
+    /// Mono Float32 PCM minták hozzáfűzése a felvételhez. A hangot az
+    /// AVAssetWriter AAC-be kódolja, és a videó mellé muxolja.
+    pub fn append_audio(&mut self, mono: &[f32]) -> Result<()> {
+        if self.finished || mono.is_empty() {
+            return Ok(());
+        }
+        let (Some(audio_input), Some(format)) =
+            (self.audio_input.as_ref(), self.audio_format.as_ref())
+        else {
+            return Ok(());
+        };
+        let channels = self.audio_channels.max(1) as usize;
+        let frames = mono.len();
+        let mut pcm = Vec::with_capacity(frames * channels * 4);
+        for sample in mono {
+            let bytes = sample.to_ne_bytes();
+            for _ in 0..channels {
+                pcm.extend_from_slice(&bytes);
+            }
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while !unsafe { audio_input.isReadyForMoreMediaData() } {
+            if std::time::Instant::now() > deadline {
+                bail!("az audió-input nem kész fogadni (timeout)");
+            }
+            std::thread::sleep(std::time::Duration::from_micros(500));
+        }
+
+        let mut block_ptr: *mut CMBlockBuffer = std::ptr::null_mut();
+        let allocator = unsafe { kCFAllocatorDefault };
+        let status = unsafe {
+            CMBlockBuffer::create_with_memory_block(
+                None,
+                std::ptr::null_mut(),
+                pcm.len(),
+                allocator,
+                std::ptr::null(),
+                0,
+                pcm.len(),
+                0,
+                NonNull::new(&mut block_ptr).unwrap(),
+            )
+        };
+        if status != 0 {
+            bail!("CMBlockBufferCreateWithMemoryBlock: {status}");
+        }
+        let block = unsafe {
+            CFRetained::from_raw(
+                NonNull::new(block_ptr).ok_or_else(|| anyhow!("nincs audio block buffer"))?,
+            )
+        };
+        let src = NonNull::new(pcm.as_ptr() as *mut c_void)
+            .ok_or_else(|| anyhow!("null PCM pointer"))?;
+        let status = unsafe { CMBlockBuffer::replace_data_bytes(src, &block, 0, pcm.len()) };
+        if status != 0 {
+            bail!("CMBlockBufferReplaceDataBytes: {status}");
+        }
+
+        let pts_ms = (self.audio_frames as f64 / self.audio_sample_rate * 1000.0).round() as i64;
+        let timing = CMSampleTimingInfo {
+            duration: CMTime {
+                value: 1,
+                timescale: self.audio_sample_rate.round() as i32,
+                flags: CMTimeFlags::Valid,
+                epoch: 0,
+            },
+            presentationTimeStamp: cm_time_ms(pts_ms),
+            decodeTimeStamp: cm_time_ms(pts_ms),
+        };
+        let sample_size = (channels * 4) as usize;
+        let mut sbuf_ptr: *mut CMSampleBuffer = std::ptr::null_mut();
+        let status = unsafe {
+            CMSampleBuffer::create_ready(
+                None,
+                Some(&block),
+                Some(&**format),
+                frames as isize,
+                1,
+                &timing,
+                1,
+                &sample_size,
+                NonNull::new(&mut sbuf_ptr).unwrap(),
+            )
+        };
+        if status != 0 {
+            bail!("CMSampleBufferCreateReady: {status}");
+        }
+        let sample_buffer = unsafe {
+            CFRetained::from_raw(
+                NonNull::new(sbuf_ptr).ok_or_else(|| anyhow!("nincs audio sample buffer"))?,
+            )
+        };
+        let ok = unsafe { audio_input.appendSampleBuffer(&sample_buffer) };
+        if !ok {
+            bail!("appendSampleBuffer (audio) sikertelen");
+        }
+        self.audio_frames += frames as u64;
+        Ok(())
+    }
+
     /// Befejezés: a fájl lezárása.
     pub fn finish(&mut self) -> Result<()> {
         if self.finished {
@@ -271,6 +487,9 @@ impl VideoWriter {
         self.finished = true;
         unsafe {
             self.input.markAsFinished();
+            if let Some(audio_input) = self.audio_input.as_ref() {
+                audio_input.markAsFinished();
+            }
             if !self.writer.finishWriting() {
                 let err = self
                     .writer
@@ -289,8 +508,55 @@ impl Drop for VideoWriter {
         if !self.finished {
             unsafe {
                 self.input.markAsFinished();
+                if let Some(audio_input) = self.audio_input.as_ref() {
+                    audio_input.markAsFinished();
+                }
                 let _ = self.writer.finishWriting();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2_av_foundation::{AVMediaTypeAudio, AVURLAsset};
+    use objc2_foundation::{NSString, NSURL};
+
+    #[test]
+    fn writes_mp4_with_audio_track() {
+        let path = std::env::temp_dir().join("dada-vj-audio-writer-test.mp4");
+        let mut writer =
+            VideoWriter::new_with_audio(&path, 320, 180, 30.0, 1_000_000, 48000.0, 2, 128_000)
+                .expect("audio writer");
+        let mut phase = 0.0f32;
+        for _ in 0..30 {
+            let pb = writer.pixel_buffer().expect("pixel buffer");
+            VideoWriter::fill(&pb, |row, _| {
+                for px in row.chunks_mut(4) {
+                    px.copy_from_slice(&[10, 20, 30, 255]);
+                }
+            })
+            .expect("fill");
+            writer.append(&pb).expect("video append");
+            let mut audio = vec![0f32; 1600];
+            for sample in audio.iter_mut() {
+                *sample = phase.sin() * 0.2;
+                phase += 440.0 * std::f32::consts::TAU / 48000.0;
+            }
+            writer.append_audio(&audio).expect("audio append");
+        }
+        writer.finish().expect("finish");
+        assert!(std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 1000);
+
+        unsafe {
+            let ns_path = NSString::from_str(path.to_str().unwrap());
+            let url = NSURL::fileURLWithPath(&ns_path);
+            let asset = AVURLAsset::URLAssetWithURL_options(&url, None);
+            let media = AVMediaTypeAudio.expect("audio media type");
+            let tracks = asset.tracksWithMediaType(media);
+            assert!(tracks.count() > 0, "a felvételben nincs audió track");
+        }
+        let _ = std::fs::remove_file(path);
     }
 }

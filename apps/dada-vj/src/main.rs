@@ -6,8 +6,8 @@
 mod app;
 mod audio_vis;
 mod bench;
-mod project;
 mod hud;
+mod project;
 mod renderer;
 mod video;
 mod web;
@@ -31,6 +31,8 @@ pub struct Args {
     pub video: Option<String>,
     /// Automatikus videó-validáció (offscreen render + pixel-visszaolvasás).
     pub video_check: bool,
+    /// PingPong / bounce lejátszás validációja (headless, reverse PTS mozgás).
+    pub bounce_check: bool,
     /// Audio-vizuál réteg bekapcsolása (spektrogram + hullámforma + spektrum).
     pub audio_visual: bool,
     /// Valódi audio-bemenet (ha nincs megadva, szintetikus forrás fut).
@@ -41,6 +43,8 @@ pub struct Args {
     pub shader: Option<String>,
     /// Automatikus shader-validáció (offscreen render + pixel-visszaolvasás).
     pub shader_check: bool,
+    /// Deckenkénti chroma key (színkivétel) automatikus ellenőrzése (headless).
+    pub chroma_check: bool,
     /// MIDI-bemenetek megnyitása.
     pub midi: bool,
     /// MIDI note -> envelope -> shader paraméter (a kickre reagáló effekt).
@@ -100,11 +104,13 @@ impl Default for Args {
             raw_bench: None,
             video: None,
             video_check: false,
+            bounce_check: false,
             audio_visual: false,
             audio_device: None,
             audio_check: false,
             shader: None,
             shader_check: false,
+            chroma_check: false,
             midi: false,
             midi_visual: false,
             midi_check: false,
@@ -161,11 +167,13 @@ impl Args {
                 }
                 "--video" => args.video = it.next(),
                 "--video-check" => args.video_check = true,
+                "--bounce-check" => args.bounce_check = true,
                 "--audio-visual" => args.audio_visual = true,
                 "--audio" => args.audio_device = it.next(),
                 "--audio-check" => args.audio_check = true,
                 "--shader" => args.shader = it.next(),
                 "--shader-check" => args.shader_check = true,
+                "--chroma-check" => args.chroma_check = true,
                 "--midi" => args.midi = true,
                 "--midi-visual" => {
                     args.midi = true;
@@ -212,7 +220,7 @@ impl Args {
                 "--fullscreen" => args.fullscreen = true,
                 "-h" | "--help" => {
                     println!(
-                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --midi              MIDI-bemenetek megnyitása (több forrás egyszerre)\n  --midi-visual       MIDI note -> envelope -> shader paraméter\n  --midi-check        automatikus MIDI-validáció (headless)\n  --deck MAPPA[:UTEM[:BLEND]]  videó-mappa mint clip-bank (többször ismételhető)\n  --autopilot N       autopilot váltás N ütem után (alap: 16)\n  --mod FORRAS->CEL[:MENNY[:DECAY]]  modulációs útvonal (többször ismételhető)\n      források: note:N, cc:N, audio.sub|bass|low_mid|mid|high_mid|high|rms|onset, lfo:UTEM, clock.phase\n      célok:    deck.opacity.N, deck.next.N, shader.param.N, audio.opacity, master.opacity\n  --mod-check         automatikus modulációs validáció (headless)\n  --rtmp URL          RTMP stream (pl. rtmp://a.rtmp.youtube.com/live2/KULCS)\n  --link              Ableton Link szinkron bekapcsolása\n  --link-status       Link-állapot kiírása (headless)\n  --encode-check      az encoder önálló validációja (headless)\n  --project FAJL.toml projekt betöltése\n  --save FAJL.toml    a felállás mentése és kilépés\n  --serve             webes vezérlő UI + MJPEG előnézet (127.0.0.1:7777)\n  --port N            a web-szerver portja\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
+                        "dada-vj {}\n\n  --size 1920x1080    ablak/render felbontás\n  --bench 10          N másodperc után kilép és összegez (ablakos)\n  --raw-bench 300     headless nyers GPU-benchmark N frame-re\n  --layers N          N teljes képernyős draw / frame (layer stressz)\n  --video FAJL        videó lejátszása a videó-rétegben (zero-copy)\n  --audio-visual      audio-vizuál réteg (spektrogram + hullámforma + spektrum)\n  --audio ESZKÖZ      valódi audio-bemenet (alapból: szintetikus forrás)\n  --audio-check       automatikus audio-validáció (headless)\n  --shader FAJL.isf   ISF shader betöltése és renderelése (hot-reload)\n  --shader-check      automatikus shader-validáció (headless)\n  --chroma-check      deckenkénti chroma key validáció (headless)\n  --midi              MIDI-bemenetek megnyitása (több forrás egyszerre)\n  --midi-visual       MIDI note -> envelope -> shader paraméter\n  --midi-check        automatikus MIDI-validáció (headless)\n  --deck MAPPA[:UTEM[:BLEND]]  videó-mappa mint clip-bank (többször ismételhető)\n  --autopilot N       autopilot váltás N ütem után (alap: 16)\n  --mod FORRAS->CEL[:MENNY[:DECAY]]  modulációs útvonal (többször ismételhető)\n      források: note:N, cc:N, audio.sub|bass|low_mid|mid|high_mid|high|rms|onset, lfo:UTEM, clock.phase\n      célok:    deck.opacity.N, deck.next.N, shader.param.N, audio.opacity, master.opacity\n  --mod-check         automatikus modulációs validáció (headless)\n  --rtmp URL          RTMP stream (pl. rtmp://a.rtmp.youtube.com/live2/KULCS)\n  --link              Ableton Link szinkron bekapcsolása\n  --link-status       Link-állapot kiírása (headless)\n  --encode-check      az encoder önálló validációja (headless)\n  --project FAJL.toml projekt betöltése\n  --save FAJL.toml    a felállás mentése és kilépés\n  --serve             webes vezérlő UI + MJPEG előnézet (127.0.0.1:7777)\n  --port N            a web-szerver portja\n  --no-vsync          vsync kikapcsolása\n  --fullscreen        teljes képernyő",
                         env!("CARGO_PKG_VERSION")
                     );
                     std::process::exit(0);
@@ -255,12 +263,8 @@ fn main() -> Result<()> {
     if let Some(path) = args.thumb_check.clone() {
         let out = format!("{path}.thumb.jpg");
         let t0 = std::time::Instant::now();
-        let jpeg = dada_media::macos::thumb::video_thumbnail(
-            std::path::Path::new(&path),
-            320,
-            180,
-            80,
-        )?;
+        let jpeg =
+            dada_media::macos::thumb::video_thumbnail(std::path::Path::new(&path), 320, 180, 80)?;
         std::fs::write(&out, &jpeg)?;
         println!(
             "THUMB — {} -> {} ({} bájt, {:.0} ms)",
@@ -275,7 +279,10 @@ fn main() -> Result<()> {
     // Link-állapot (headless).
     if args.link_status {
         let listener = dada_link::LinkListener::new()?;
-        println!("LINK — port {}, 6 másodpercig figyelek...", dada_link::LINK_PORT);
+        println!(
+            "LINK — port {}, 6 másodpercig figyelek...",
+            dada_link::LINK_PORT
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
         while std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -291,7 +298,9 @@ fn main() -> Result<()> {
             }
         }
         if listener.packets() == 0 {
-            println!("  nincs Link peer (indítsd el az Ableton Live-ot, vagy egy másik Link klienst)");
+            println!(
+                "  nincs Link peer (indítsd el az Ableton Live-ot, vagy egy másik Link klienst)"
+            );
         }
         return Ok(());
     }
@@ -321,6 +330,11 @@ fn main() -> Result<()> {
         return pollster::block_on(bench::shader_check(&args));
     }
 
+    // Headless deckenkénti chroma key (színkivétel) validáció.
+    if args.chroma_check {
+        return pollster::block_on(bench::chroma_check(&args));
+    }
+
     // Headless audio-validáció.
     if args.audio_check {
         return pollster::block_on(bench::audio_check(&args));
@@ -329,6 +343,11 @@ fn main() -> Result<()> {
     // Headless videó-validáció.
     if args.video_check {
         return pollster::block_on(bench::video_check(&args));
+    }
+
+    // Headless bounce / reverse lejátszás validáció.
+    if args.bounce_check {
+        return pollster::block_on(bench::bounce_check(&args));
     }
 
     // Headless mód: nem kell ablak, nem kell WindowServer.

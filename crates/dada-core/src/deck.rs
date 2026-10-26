@@ -41,6 +41,43 @@ impl Default for LoopMode {
     }
 }
 
+/// Klipp-szintű chroma key felülírás módja.
+///
+/// A deck szintű chroma key az alapértelmezés; a klip ezt felülírhatja.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromaMode {
+    /// A deck beállításait örökli (alapértelmezés).
+    Inherit,
+    /// A klip saját kulcsszíne/paraméterei élnek.
+    Custom,
+    /// Ezen a klipen nincs kulcs, akkor sem, ha a deck kulcsa be van kapcsolva.
+    Off,
+}
+
+impl Default for ChromaMode {
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
+impl ChromaMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChromaMode::Inherit => "inherit",
+            ChromaMode::Custom => "custom",
+            ChromaMode::Off => "off",
+        }
+    }
+
+    pub fn from_name(name: Option<&str>) -> Self {
+        match name {
+            Some("custom") => ChromaMode::Custom,
+            Some("off") => ChromaMode::Off,
+            _ => ChromaMode::Inherit,
+        }
+    }
+}
+
 /// Honnan jön a clip képe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipSource {
@@ -62,11 +99,31 @@ pub struct Clip {
     pub opacity: f32,
     pub blend: BlendMode,
     pub loop_mode: LoopMode,
+    /// Ha > 0, a klip hosszát ehhez az ütemszámhoz igazítja a BPM-hez
+    /// (a lejátszási sebesség automatikus állításával).
+    pub snap_beats: f64,
     /// Súly az autopilot véletlen választásához.
     pub weight: f32,
+    /// Klipp-szintű chroma key felülírás módja (deck alap felett).
+    pub chroma_mode: ChromaMode,
+    /// A klip saját kulcsszíne sRGB-ben (Custom módban él).
+    pub chroma_color: [f32; 3],
+    pub chroma_tolerance: f32,
+    pub chroma_softness: f32,
+    pub chroma_spill: f32,
 }
 
 impl Clip {
+    /// A BPM-hez igazított hosszhoz tartozó lejátszási sebesség.
+    /// 0 vagy negatív beats esetén nincs igazítás (1.0).
+    pub fn snap_speed(duration_secs: f64, in_point: f64, beats: f64, bpm: f64) -> f64 {
+        if beats <= 0.0 || bpm <= 0.0 || duration_secs <= 0.0 {
+            return 1.0;
+        }
+        let media = (duration_secs - in_point).max(0.05);
+        (media * bpm / (beats * 60.0)).clamp(0.05, 8.0)
+    }
+
     pub fn new(name: impl Into<String>, source: ClipSource) -> Self {
         Self {
             name: name.into(),
@@ -76,7 +133,13 @@ impl Clip {
             opacity: 1.0,
             blend: BlendMode::Normal,
             loop_mode: LoopMode::Loop,
+            snap_beats: 0.0,
             weight: 1.0,
+            chroma_mode: ChromaMode::Inherit,
+            chroma_color: [0.0, 1.0, 0.0],
+            chroma_tolerance: 0.28,
+            chroma_softness: 0.12,
+            chroma_spill: 0.35,
         }
     }
 }
@@ -87,6 +150,19 @@ pub enum AutopilotMode {
     Sequential,
     Shuffle,
     Weighted,
+}
+
+/// A kézi „Következő klip” gomb viselkedése — független az autopilottól.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualNextMode {
+    Sequential,
+    Shuffle,
+}
+
+impl Default for ManualNextMode {
+    fn default() -> Self {
+        Self::Sequential
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +204,11 @@ pub struct Deck {
     pub active: Option<usize>,
     pub queued: Option<Queued>,
     pub autopilot: Autopilot,
+    /// A kézi „Következő klip” gomb módja (autopilottól független).
+    pub manual_next: ManualNextMode,
+    /// Deck-szintű BPM-hossz igazítás ütemekben (0 = kikapcsolva).
+    /// Ha > 0, a deck összes klipje ehhez igazodik.
+    pub bpm_sync: f64,
     /// Crossfade hossza ütemekben (0 = azonnali vágás).
     pub fade_beats: f64,
     /// Az éppen lecsengő előző klip.
@@ -135,6 +216,17 @@ pub struct Deck {
     pub fade_remaining: f64,
     pub opacity: f32,
     pub blend: BlendMode,
+    /// Deck-szintű chroma key (színkivétel): a kulcsszínhez közeli pixelek
+    /// átlátszóvá válnak az adott deck videó-rétegén (ArKaOS-stílus).
+    pub chroma_key: bool,
+    /// A kivett kulcsszín sRGB-ben (0..1).
+    pub chroma_color: [f32; 3],
+    /// Mennyire térhet el a kulcsszíntől (0 = semmi, 1 = nagyon megengedő).
+    pub chroma_tolerance: f32,
+    /// A kulcs szélének lágysága (0 = kemény szél).
+    pub chroma_softness: f32,
+    /// Despill: a kulcsszínhez közeli, megtartott pixelek telítettség-csökkentése.
+    pub chroma_spill: f32,
     pub launched_count: u64,
     rng: u64,
 }
@@ -147,13 +239,56 @@ impl Deck {
             active: None,
             queued: None,
             autopilot: Autopilot::default(),
+            manual_next: ManualNextMode::default(),
+            bpm_sync: 0.0,
             fade_beats: 0.0,
             fading_from: None,
             fade_remaining: 0.0,
             opacity: 1.0,
             blend: BlendMode::Normal,
+            chroma_key: false,
+            chroma_color: [0.0, 1.0, 0.0],
+            chroma_tolerance: 0.28,
+            chroma_softness: 0.12,
+            chroma_spill: 0.35,
             launched_count: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
+        }
+    }
+
+    /// A deck chroma key beállításai: (bekapcsolva, szín, tolerance, softness, spill).
+    pub fn chroma(&self) -> (bool, [f32; 3], f32, f32, f32) {
+        (
+            self.chroma_key,
+            self.chroma_color,
+            self.chroma_tolerance,
+            self.chroma_softness,
+            self.chroma_spill,
+        )
+    }
+
+    /// Egy klip **effektív** chroma beállításai a deck-alap és a klip
+    /// felülírása alapján:
+    ///   * Inherit -> a deck beállításai,
+    ///   * Custom  -> a klip saját kulcsszíne és paraméterei (bekapcsolva),
+    ///   * Off     -> ezen a klipen nincs kulcs.
+    ///
+    /// clip = None (vagy érvénytelen index) esetén a deck beállításai.
+    pub fn chroma_for_clip(&self, clip: Option<usize>) -> (bool, [f32; 3], f32, f32, f32) {
+        let deck = self.chroma();
+        let Some(c) = clip.and_then(|i| self.clips.get(i)) else {
+            return deck;
+        };
+        match c.chroma_mode {
+            ChromaMode::Inherit => deck,
+            ChromaMode::Custom => (
+                true,
+                c.chroma_color,
+                c.chroma_tolerance,
+                c.chroma_softness,
+                c.chroma_spill,
+            ),
+            ChromaMode::Off => (false, deck.1, deck.2, deck.3, deck.4),
         }
     }
 
@@ -208,6 +343,30 @@ impl Deck {
                     }
                 }
                 Some(n - 1)
+            }
+        }
+    }
+
+    /// A kézi „Következő klip” gomb által választott index. Ez független
+    /// az autopilot shuffle/sequential beállításától.
+    pub fn pick_manual_next(&mut self) -> Option<usize> {
+        let n = self.clips.len();
+        if n == 0 {
+            return None;
+        }
+        match self.manual_next {
+            ManualNextMode::Sequential => {
+                Some(self.active.map(|a| (a + 1) % n).unwrap_or(0))
+            }
+            ManualNextMode::Shuffle => {
+                if n == 1 {
+                    return Some(0);
+                }
+                let mut r = (self.next_rng() % n as u64) as usize;
+                if Some(r) == self.active {
+                    r = (r + 1) % n;
+                }
+                Some(r)
             }
         }
     }
@@ -270,6 +429,23 @@ impl Mixer {
             manual: true,
         });
         Some(at)
+    }
+
+    /// A zenei idővonal hirtelen eltolásakor (beat reset, tap fázis, MIDI
+    /// Start, Link ugrás) a már betervezett autopilot/queue időpontokat is
+    /// ugyanazzal a deltával toljuk, hogy ne akadjon meg a rotáció.
+    pub fn shift_schedule(&mut self, delta_beats: f64) {
+        if !delta_beats.is_finite() || delta_beats.abs() < 1e-9 {
+            return;
+        }
+        for deck in &mut self.decks {
+            if let Some(next) = deck.autopilot.next_change.as_mut() {
+                *next += delta_beats;
+            }
+            if let Some(q) = deck.queued.as_mut() {
+                q.at_beat += delta_beats;
+            }
+        }
     }
 
     /// Teljesen azonnali indítás (vészhelyzeti / kézi).
@@ -464,11 +640,50 @@ mod tests {
     }
 
     #[test]
+    fn manual_next_is_independent_of_autopilot() {
+        let mut d = Deck::new("A", bank(5));
+        d.active = Some(2);
+        d.autopilot.mode = AutopilotMode::Shuffle;
+        d.manual_next = ManualNextMode::Sequential;
+        assert_eq!(d.pick_manual_next(), Some(3));
+
+        d.manual_next = ManualNextMode::Shuffle;
+        for _ in 0..50 {
+            let n = d.pick_manual_next().unwrap();
+            assert!(n < 5);
+            assert_ne!(n, 2, "a kézi random ne ismételje önmagát");
+        }
+    }
+
+    #[test]
+    fn shift_schedule_preserves_relative_timing() {
+        let mut m = Mixer::new(1);
+        m.decks[0].clips = bank(3);
+        m.decks[0].autopilot.next_change = Some(8.0);
+        m.queue(0, 1, 0.0, Quantize::Beat);
+        m.shift_schedule(-1.0);
+        assert!((m.decks[0].autopilot.next_change.unwrap() - 7.0).abs() < 1e-9);
+        assert!((m.decks[0].queued.unwrap().at_beat - 0.0).abs() < 1e-9);
+        let ev = m.tick(0.0, 0.0);
+        assert!(ev.iter().any(|e| matches!(e, DeckEvent::Launch { clip: 1, .. })));
+    }
+
+    #[test]
     fn invalid_clip_is_rejected() {
         let mut m = Mixer::new(1);
         m.decks[0].clips = bank(2);
         assert!(m.queue(0, 5, 0.0, Quantize::Bar).is_none());
         assert!(m.queue(9, 0, 0.0, Quantize::Bar).is_none());
+    }
+
+    #[test]
+    fn snap_speed_fits_clip_to_beats() {
+        // 8 másodperces klip 128 BPM-en 4 ütem = 1.875 s -> 4.27x.
+        let speed = Clip::snap_speed(8.0, 0.0, 4.0, 128.0);
+        assert!((speed - 4.2667).abs() < 0.001, "speed = {speed}");
+        // 4 ütem 120 BPM-en 2 s, 8 s klip -> 4x.
+        assert!((Clip::snap_speed(8.0, 0.0, 4.0, 120.0) - 4.0).abs() < 1e-9);
+        assert_eq!(Clip::snap_speed(8.0, 0.0, 0.0, 120.0), 1.0);
     }
 
     #[test]
@@ -481,5 +696,65 @@ mod tests {
         for _ in 0..20 {
             assert_eq!(d.pick_next(), Some(2));
         }
+    }
+
+    #[test]
+    fn chroma_key_defaults_to_off_green() {
+        let d = Deck::new("t", bank(1));
+        let (on, color, tol, soft, spill) = d.chroma();
+        assert!(!on);
+        assert_eq!(color, [0.0, 1.0, 0.0]);
+        assert!((tol - 0.28).abs() < 1e-6);
+        assert!((soft - 0.12).abs() < 1e-6);
+        assert!((spill - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chroma_for_clip_resolves_inherit_custom_off() {
+        let mut d = Deck::new("t", bank(2));
+        d.chroma_key = true;
+        d.chroma_color = [0.1, 0.9, 0.2];
+        d.chroma_tolerance = 0.3;
+        d.chroma_softness = 0.11;
+        d.chroma_spill = 0.4;
+
+        // Alap: öröklés -> deck beállítások.
+        assert_eq!(d.clips[0].chroma_mode, ChromaMode::Inherit);
+        assert_eq!(d.chroma_for_clip(Some(0)), d.chroma());
+        // Nincs klip / érvénytelen index -> deck.
+        assert_eq!(d.chroma_for_clip(None), d.chroma());
+        assert_eq!(d.chroma_for_clip(Some(9)), d.chroma());
+
+        // Custom: a klip saját értékei, bekapcsolva.
+        d.clips[1].chroma_mode = ChromaMode::Custom;
+        d.clips[1].chroma_color = [1.0, 0.0, 0.0];
+        d.clips[1].chroma_tolerance = 0.5;
+        d.clips[1].chroma_softness = 0.2;
+        d.clips[1].chroma_spill = 0.6;
+        let (on, color, tol, soft, spill) = d.chroma_for_clip(Some(1));
+        assert!(on);
+        assert_eq!(color, [1.0, 0.0, 0.0]);
+        assert!((tol - 0.5).abs() < 1e-6);
+        assert!((soft - 0.2).abs() < 1e-6);
+        assert!((spill - 0.6).abs() < 1e-6);
+
+        // Off: deck kulcs ellenére sincs kulcs a klipen.
+        d.clips[0].chroma_mode = ChromaMode::Off;
+        assert!(!d.chroma_for_clip(Some(0)).0);
+        // A deck beállítása és a másik klip öröklése változatlan.
+        assert!(d.chroma().0);
+        assert_eq!(d.chroma_for_clip(Some(0)).1, d.chroma_color);
+        // Visszaállítás öröklésre.
+        d.clips[0].chroma_mode = ChromaMode::Inherit;
+        assert!(d.chroma_for_clip(Some(0)).0);
+    }
+
+    #[test]
+    fn chroma_mode_names_round_trip() {
+        for mode in [ChromaMode::Inherit, ChromaMode::Custom, ChromaMode::Off] {
+            assert_eq!(ChromaMode::from_name(Some(mode.as_str())), mode);
+        }
+        assert_eq!(ChromaMode::from_name(None), ChromaMode::Inherit);
+        assert_eq!(ChromaMode::from_name(Some("ismeretlen")), ChromaMode::Inherit);
     }
 }

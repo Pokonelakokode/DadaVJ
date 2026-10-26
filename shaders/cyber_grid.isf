@@ -1,0 +1,41 @@
+/*{
+    "DESCRIPTION": "Cyber Grid — synthwave lézerrács és napkorong",
+    "CREDIT": "Dada VJ",
+    "ISFVSN": "2",
+    "CATEGORIES": [ "Generator" ],
+    "INPUTS": [
+        { "NAME": "speed", "TYPE": "float", "DEFAULT": 1.5, "MIN": 0.0, "MAX": 6.0 },
+        { "NAME": "horizon", "TYPE": "float", "DEFAULT": 0.48, "MIN": 0.2, "MAX": 0.8 },
+        { "NAME": "density", "TYPE": "float", "DEFAULT": 12.0, "MIN": 4.0, "MAX": 32.0 },
+        { "NAME": "sun_size", "TYPE": "float", "DEFAULT": 0.25, "MIN": 0.05, "MAX": 0.6 },
+        { "NAME": "grid_color", "TYPE": "color", "DEFAULT": [ 0.0, 1.0, 0.85, 1.0 ] },
+        { "NAME": "sun_color", "TYPE": "color", "DEFAULT": [ 1.0, 0.15, 0.55, 1.0 ] }
+    ]
+}*/
+
+void main() {
+    vec2 uv = isf_FragNormCoord;
+    float aspect = RENDERSIZE.x / max(RENDERSIZE.y, 1.0);
+    vec2 p = vec2((uv.x - 0.5) * aspect, uv.y - horizon);
+
+    vec3 col = vec3(0.02, 0.01, 0.06);
+    if (p.y < 0.0) {
+        // Föld / perspektivikus rács
+        float z = 0.25 / max(-p.y, 0.002);
+        float x = p.x * z * (density * 0.25);
+        float gz = fract(z * (density * 0.25) - TIME * speed);
+        float gx = fract(x);
+        float line_x = smoothstep(0.06, 0.0, min(gx, 1.0 - gx));
+        float line_z = smoothstep(0.08, 0.0, min(gz, 1.0 - gz));
+        float fade = exp(p.y * 2.5);
+        col += grid_color.rgb * max(line_x, line_z) * (0.3 + 0.9 * fade);
+    } else {
+        // Égbolt + synthwave napkorong
+        float d = length(vec2(p.x, p.y - sun_size * 0.6));
+        float sun = smoothstep(sun_size, sun_size * 0.94, d);
+        float stripes = step(0.25, fract(p.y * 28.0 - TIME * 0.4));
+        col += sun_color.rgb * sun * mix(1.0, stripes, smoothstep(sun_size * 0.6, 0.0, p.y));
+        col += sun_color.rgb * (0.04 / (abs(p.y) + 0.03));
+    }
+    gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+}

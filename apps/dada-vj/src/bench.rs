@@ -13,7 +13,7 @@
 
 use crate::audio_vis::AudioVisual;
 use crate::renderer::{LayerRef, Renderer};
-use dada_core::BlendMode;
+use dada_core::{BlendMode, LoopMode};
 use crate::video::VideoLayer;
 use dada_audio::AudioEngine;
 use dada_fx::{Effect, IsfShader};
@@ -333,6 +333,8 @@ pub async fn mod_check(_args: &Args) -> Result<()> {
         attack_ms: 0.0,
         hold_ms: 0.0,
         decay_ms: 200.0,
+        sustain: 0.0,
+        release_ms: 150.0,
         curve: Curve::Linear,
         retrigger: true,
     };
@@ -444,6 +446,8 @@ pub async fn midi_check(args: &Args) -> Result<()> {
         attack_ms: 0.0,
         hold_ms: 0.0,
         decay_ms: 220.0,
+        sustain: 0.0,
+        release_ms: 150.0,
         curve: Curve::Exponential,
         retrigger: true,
     };
@@ -578,13 +582,354 @@ pub async fn midi_check(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Automatikus ISF-validáció: a shader lefordul, lefut, és a kimenet változik?
-/// Az ISF fejléc képi bemeneteinek nevei (a kiíráshoz).
-fn effect_image_names(path: &str) -> String {
-    match IsfShader::load(Path::new(path)) {
-        Ok(s) => s.images.join(", "),
-        Err(_) => "?".to_string(),
+/// Szilárd színű videó-réteg teljes (32 bájtos) paraméterezéssel — headless
+/// chroma key teszthez.
+fn solid_layer_with_chroma(
+    renderer: &Renderer,
+    srgb: [f32; 3],
+    opacity: f32,
+    chroma: (bool, [f32; 3], f32, f32, f32),
+) -> (wgpu::Texture, LayerRef) {
+    let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let texel = [to_u8(srgb[0]), to_u8(srgb[1]), to_u8(srgb[2]), 255u8];
+    let mut pixels = [0u8; 2 * 2 * 4];
+    for i in 0..4 {
+        pixels[i * 4..i * 4 + 4].copy_from_slice(&texel);
     }
+    let texture = renderer.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("solid-video-layer"),
+        size: wgpu::Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    renderer.queue().write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(2),
+        },
+        wgpu::Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let params = renderer.create_layer_params();
+    let data: [f32; 8] = [
+        opacity,
+        if chroma.0 { 1.0 } else { 0.0 },
+        chroma.2,
+        chroma.3,
+        chroma.1[0],
+        chroma.1[1],
+        chroma.1[2],
+        chroma.4,
+    ];
+    renderer
+        .queue()
+        .write_buffer(&params, 0, bytemuck::cast_slice(&data));
+    let layer = LayerRef {
+        pipeline: renderer.video_pipeline(BlendMode::Normal).clone(),
+        bind_group: renderer.make_video_bind_group(&view, &params),
+    };
+    (texture, layer)
+}
+
+/// Deck-szintű chroma key (színkivétel) önálló ellenőrzése (headless GPU).
+///
+/// Igazolja, hogy:
+///  1. a kulcsszín (zöld) bekapcsolt kulccsal átlátszóvá válik (a háttér látszik),
+///  2. kikapcsolt kulccsal a réteg változatlanul látszik,
+///  3. más kulcsszín (piros) mellett a zöld réteg megmarad (nem kulcsol túl),
+///  4. 50% opacity mellett a réteg félig áttetsző.
+pub async fn chroma_check(_args: &Args) -> Result<()> {
+    let width = 256u32;
+    let height = 256u32;
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let mut renderer = Renderer::new_offscreen(width, height, format).await?;
+    let green = [0.10f32, 0.85, 0.15];
+
+    // 1) Kulcs be, kulcsszín = zöld -> a réteg átlátszó.
+    let (_t1, layer1) =
+        solid_layer_with_chroma(&renderer, green, 1.0, (true, green, 0.28, 0.12, 0.35));
+    renderer.render(0.0, 0.0, &[layer1])?;
+    let keyed = read_center_rgb(&renderer)?;
+    println!(
+        "  kulcsolt (zöld kulcsszín): R={} G={} B={}",
+        keyed[0], keyed[1], keyed[2]
+    );
+    if keyed[0].max(keyed[1]).max(keyed[2]) > 64 {
+        bail!("a chroma key nem tette átlátszóvá a kulcsszínt (a háttér nem látszik)");
+    }
+
+    // 2) Kulcs ki -> a zöld réteg látszik.
+    let (_t2, layer2) = solid_layer_with_chroma(
+        &renderer,
+        green,
+        1.0,
+        (false, green, 0.28, 0.12, 0.35),
+    );
+    renderer.render(0.0, 0.0, &[layer2])?;
+    let visible = read_center_rgb(&renderer)?;
+    println!(
+        "  kulcs nélkül: R={} G={} B={}",
+        visible[0], visible[1], visible[2]
+    );
+    if visible[1] < 120 {
+        bail!("kikapcsolt chroma key mellett a zöld réteg nem látszik");
+    }
+
+    // 3) Más kulcsszín (piros) -> a zöld réteg megmarad.
+    let (_t3, layer3) = solid_layer_with_chroma(
+        &renderer,
+        green,
+        1.0,
+        (true, [1.0, 0.0, 0.0], 0.28, 0.12, 0.35),
+    );
+    renderer.render(0.0, 0.0, &[layer3])?;
+    let other = read_center_rgb(&renderer)?;
+    println!(
+        "  más kulcsszínnel (piros): R={} G={} B={}",
+        other[0], other[1], other[2]
+    );
+    if other[1] < 120 {
+        bail!("a zöld réteg eltűnt, amikor a kulcsszín piros (túl széles kulcsozás)");
+    }
+
+    // 4) 50% opacity: félig áttetsző.
+    let (_t4, layer4) = solid_layer_with_chroma(
+        &renderer,
+        green,
+        0.5,
+        (false, green, 0.28, 0.12, 0.35),
+    );
+    renderer.render(0.0, 0.0, &[layer4])?;
+    let half = read_center_rgb(&renderer)?;
+    println!(
+        "  50% opacity: R={} G={} B={}",
+        half[0], half[1], half[2]
+    );
+    if half[1] <= 40 || half[1] >= visible[1] - 20 {
+        bail!("az 50%-os opacity nem félig áttetsző kimenetet ad");
+    }
+
+    renderer.wait_idle();
+    println!("  OK: a deckenkénti chroma key kulcsol, kikapcsolható, és más színt nem kulcsol.");
+    Ok(())
+}
+
+/// Automatikus ISF-validáció: a shader lefordul, lefut, és a kimenet változik?
+/// Szintetikus, egyszínű kép-réteg az ISF effekt bemenetéhez.
+fn synthetic_input_layer(renderer: &Renderer, srgb: [f32; 3]) -> (wgpu::Texture, LayerRef) {
+    let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let texel = [to_u8(srgb[0]), to_u8(srgb[1]), to_u8(srgb[2]), 255u8];
+    let mut pixels = [0u8; 2 * 2 * 4];
+    for i in 0..4 {
+        pixels[i * 4..i * 4 + 4].copy_from_slice(&texel);
+    }
+    let texture = renderer.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("synthetic-isf-input"),
+        size: wgpu::Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    renderer.queue().write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(2),
+        },
+        wgpu::Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let params = renderer.create_layer_params();
+    // 32 bájt: opacity=1, chroma key kikapcsolva (key_enabled = 0).
+    renderer.queue().write_buffer(
+        &params,
+        0,
+        bytemuck::cast_slice(&[1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    );
+    let layer = LayerRef {
+        pipeline: renderer.video_pipeline(BlendMode::Normal).clone(),
+        bind_group: renderer.make_video_bind_group(&view, &params),
+    };
+    (texture, layer)
+}
+
+/// Az effektet egyedüli rétegként rendereli a headless célba.
+fn render_effect_only(renderer: &mut Renderer, effect: &Effect) -> Result<()> {
+    let layers = [LayerRef {
+        pipeline: effect.pipeline(BlendMode::Normal).clone(),
+        bind_group: effect.bind_group().clone(),
+    }];
+    renderer.render(0.0, 0.0, &layers)?;
+    Ok(())
+}
+
+/// Az offscreen cél közepének átlagos RGB színe (BGRA visszaolvasásból,
+/// a soronkénti 256 bájtos padding kihagyásával).
+fn read_center_rgb_sized(renderer: &Renderer, cols: u32, rows: u32) -> Option<[u8; 3]> {
+    let px = renderer.read_back_center(cols, rows)?;
+    let bytes_per_row = ((cols * 4).div_ceil(256)) * 256;
+    let mut sum = [0u32; 3];
+    let mut n = 0u32;
+    for y in 0..rows {
+        let row = (y * bytes_per_row) as usize;
+        for x in 0..cols {
+            let o = row + (x * 4) as usize;
+            sum[0] += px.get(o + 2).copied().unwrap_or(0) as u32;
+            sum[1] += px.get(o + 1).copied().unwrap_or(0) as u32;
+            sum[2] += px.get(o).copied().unwrap_or(0) as u32;
+            n += 1;
+        }
+    }
+    let n = n.max(1);
+    Some([
+        (sum[0] / n) as u8,
+        (sum[1] / n) as u8,
+        (sum[2] / n) as u8,
+    ])
+}
+
+fn read_center_rgb(renderer: &Renderer) -> Result<[u8; 3]> {
+    match read_center_rgb_sized(renderer, 4, 4) {
+        Some(rgb) => Ok(rgb),
+        None => bail!("nincs offscreen visszaolvasási cél"),
+    }
+}
+
+/// Képi bemenetes ISF effekt kompozit-ellenőrzése szintetikus bemenettel.
+///
+/// Két dolgot igazol pixel-szinten:
+///  1. **fedés módban** (coverage, opacity = 1) az effekt teljesen lefedi az
+///     alatta lévő képet — a sötét háttér nem üt át (ez a "full opacity mégis
+///     látszik a videó" hiba regresszió-tesztje);
+///  2. ha a shader kulcsozó paraméterekkel bír (key_color + tolerance), akkor
+///     **shader-alpha módban** a kiválasztott szín átlátszó lesz, invertálva
+///     pedig éppen a kulcsszín marad meg.
+fn check_effect_composite(
+    renderer: &mut Renderer,
+    effect: &mut Effect,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    // Élénk narancs bemenet: egyértelműen elválik a sötét háttértől.
+    let input_srgb = [0.95f32, 0.45, 0.08];
+    let (_input_tex, below) = synthetic_input_layer(renderer, input_srgb);
+    let Some(input_view) = renderer.render_input(0.0, 0.0, &[below]) else {
+        bail!("az ISF képi bemeneti target nem jött létre");
+    };
+    effect.set_input(renderer.device(), &input_view);
+    let res = [width as f32, height as f32];
+    let dt = 1.0 / 60.0;
+
+    // 1) Fedés: opacity = 1 => a kimenet alpha-ja 1, a háttér nem látszhat.
+    effect.alpha_from_shader = false;
+    effect.opacity = 1.0;
+    effect.update(renderer.queue(), res, 0.0, dt);
+    render_effect_only(renderer, effect)?;
+    let px = read_center_rgb(renderer)?;
+    println!("  fedés (coverage) minta: R={} G={} B={}", px[0], px[1], px[2]);
+    if px[0].max(px[1]).max(px[2]) < 32 {
+        bail!("a fedés módú effekt nem takarja le a hátteret (a mögötte lévő kép átüt)");
+    }
+
+    // 2) Chroma key: a bemenet színére állított kulccsal shader-alpha módban
+    //    a kép átlátszó, invertálva pedig a kulcsszín marad meg.
+    let key_idx = effect
+        .shader
+        .params
+        .iter()
+        .position(|p| p.name == "key_color");
+    let tol_idx = effect
+        .shader
+        .params
+        .iter()
+        .position(|p| p.name == "tolerance");
+    if let (Some(key_idx), Some(tol_idx)) = (key_idx, tol_idx) {
+        let srgb_to_linear = |c: f32| {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        effect.set_param(
+            key_idx,
+            [
+                srgb_to_linear(input_srgb[0]),
+                srgb_to_linear(input_srgb[1]),
+                srgb_to_linear(input_srgb[2]),
+                1.0,
+            ],
+        );
+        effect.set_param(tol_idx, [0.12, 0.0, 0.0, 0.0]);
+        if let Some(soft_idx) = effect.shader.params.iter().position(|p| p.name == "softness") {
+            effect.set_param(soft_idx, [0.0, 0.0, 0.0, 0.0]);
+        }
+        effect.alpha_from_shader = true;
+        effect.update(renderer.queue(), res, 0.0, dt);
+        render_effect_only(renderer, effect)?;
+        let keyed = read_center_rgb(renderer)?;
+        println!(
+            "  chroma key (kivett szín): R={} G={} B={}",
+            keyed[0], keyed[1], keyed[2]
+        );
+        if keyed[0].max(keyed[1]).max(keyed[2]) > 40 {
+            bail!("a chroma key nem kulcsolta ki a kiválasztott színt");
+        }
+        if let Some(inv_idx) = effect.shader.params.iter().position(|p| p.name == "invert") {
+            effect.set_param(inv_idx, [1.0, 0.0, 0.0, 0.0]);
+            effect.update(renderer.queue(), res, 0.0, dt);
+            render_effect_only(renderer, effect)?;
+            let inverted = read_center_rgb(renderer)?;
+            println!(
+                "  chroma key (invert): R={} G={} B={}",
+                inverted[0], inverted[1], inverted[2]
+            );
+            if inverted[0].max(inverted[1]).max(inverted[2]) < 32 {
+                bail!("a chroma key invert módban nem tartja meg a kulcsszínt");
+            }
+        }
+        println!("  OK: chroma key kulcsolás és invert mód.");
+    }
+    println!("  OK: az ISF effekt lefedi a hátteret és a képi bemenet működik.");
+    Ok(())
 }
 
 pub async fn shader_check(args: &Args) -> Result<()> {
@@ -617,13 +962,12 @@ pub async fn shader_check(args: &Args) -> Result<()> {
     let has_inputs = !shader.images.is_empty();
     let mut effect = Effect::new(renderer.device(), format, shader)?;
     if has_inputs {
-        // A shader lefordult és a bind group (a képi bemenet bindings-ével)
-        // felépült — ennyit tud igazolni ez az önálló ellenőrzés. A kimenet
-        // fekete, mert nincs forrás; az élő út (lentebbi rétegek a bemenet)
-        // külön igazolt (lásd docs/17).
-        println!("  képi bemenet(ek): {} — a shader lefordult, a bind group felépült.", effect_image_names(&path));
-        println!("  A kimenet önmagában fekete (nincs forrás) — ez nem hiba;");
-        println!("  az élő ellenőrzés: --video ... --shader ... --serve");
+        println!("  képi bemenet(ek): {}", effect.shader.images.join(", "));
+        println!("  -- kompozit-ellenőrzés szintetikus bemenettel --");
+        // A shader lefordult, a bind group felépült, és a képi bemenet
+        // (lentebbi rétegek) tényleg átmegy rajta — ezt pixel-szinten is
+        // igazoljuk (fedés + opcionális chroma key).
+        check_effect_composite(&mut renderer, &mut effect, width, height)?;
         return Ok(());
     }
     let mut samples: Vec<(u32, [u8; 3])> = Vec::new();
@@ -643,21 +987,8 @@ pub async fn shader_check(args: &Args) -> Result<()> {
         }];
         renderer.render(t, 0.0, &layers)?;
         if i % 20 == 0 {
-            if let Some(px) = renderer.read_back_center(8, 8) {
-                let mut sum = [0u32; 3];
-                let mut n = 0u32;
-                for chunk in px.chunks_exact(4) {
-                    sum[0] += chunk[2] as u32;
-                    sum[1] += chunk[1] as u32;
-                    sum[2] += chunk[0] as u32;
-                    n += 1;
-                }
-                if n > 0 {
-                    samples.push((
-                        i,
-                        [(sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8],
-                    ));
-                }
+            if let Some(rgb) = read_center_rgb_sized(&renderer, 8, 8) {
+                samples.push((i, rgb));
             }
         }
     }
@@ -831,7 +1162,8 @@ pub async fn video_check(args: &Args) -> Result<()> {
         let view = video.advance(renderer.device(), now)?;
         if let Some(view) = view {
             let params = renderer.create_layer_params();
-            let data: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+            // 32 bájt: opacity=1, chroma key kikapcsolva.
+            let data: [f32; 8] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
             renderer
                 .queue()
                 .write_buffer(&params, 0, bytemuck::cast_slice(&data));
@@ -887,6 +1219,56 @@ pub async fn video_check(args: &Args) -> Result<()> {
         bail!("a kimenet nem változik — a videó nem jut el a shaderig");
     }
     println!("  OK: a videó a shaderen keresztül jelenik meg.");
+    Ok(())
+}
+
+/// Bounce / PingPong validáció: a videó a végére érve visszafelé folytatódik.
+pub async fn bounce_check(args: &Args) -> Result<()> {
+    let Some(path) = &args.video else {
+        bail!("a --bounce-check-hez kell --video <fájl>");
+    };
+    let mut renderer =
+        Renderer::new_offscreen(1280, 720, wgpu::TextureFormat::Bgra8UnormSrgb).await?;
+    let mut video = VideoLayer::open(renderer.device(), Path::new(path), 1.0)?;
+    video.loop_mode = LoopMode::PingPong;
+    let duration = video.duration();
+    if duration <= 0.0 {
+        bail!("a videó hossza ismeretlen");
+    }
+    println!(
+        "BOUNCE-CHECK — {path} ({:.2} s, {:.2} fps)",
+        duration,
+        video.nominal_fps()
+    );
+    let start = Instant::now();
+    let fps = 60.0f64;
+    let frames = ((duration + 1.5) * fps).ceil() as usize;
+    let mut prev_pts = 0.0f64;
+    let mut saw_reverse = false;
+    let mut reverse_steps = 0usize;
+    let mut forward_max = 0.0f64;
+    for i in 0..frames {
+        let now = start + Duration::from_secs_f64(i as f64 / fps);
+        video.advance(renderer.device(), now)?;
+        if video.is_reversing() {
+            saw_reverse = true;
+            if video.last_pts + 1e-5 < prev_pts {
+                reverse_steps += 1;
+            }
+        } else {
+            forward_max = forward_max.max(video.last_pts);
+        }
+        prev_pts = video.last_pts;
+    }
+    renderer.wait_idle();
+    println!(
+        "  forward max PTS: {forward_max:.2} s · reverse: {saw_reverse} · reverse lépés: {reverse_steps} · utolsó PTS: {:.2} s",
+        video.last_pts
+    );
+    if !saw_reverse || reverse_steps == 0 {
+        bail!("a bounce mód nem indult visszafelé");
+    }
+    println!("  OK: a PingPong / bounce lejátszás visszafelé is halad.");
     Ok(())
 }
 

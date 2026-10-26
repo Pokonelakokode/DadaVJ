@@ -57,6 +57,9 @@ pub struct Metadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamKind {
     Float,
+    Bool,
+    Long,
+    Event,
     Point2D,
     Color,
 }
@@ -64,7 +67,7 @@ pub enum ParamKind {
 impl ParamKind {
     pub fn glsl_type(self) -> &'static str {
         match self {
-            ParamKind::Float => "float",
+            ParamKind::Float | ParamKind::Bool | ParamKind::Long | ParamKind::Event => "float",
             ParamKind::Point2D => "vec2",
             ParamKind::Color => "vec4",
         }
@@ -72,7 +75,7 @@ impl ParamKind {
 
     pub fn components(self) -> usize {
         match self {
-            ParamKind::Float => 1,
+            ParamKind::Float | ParamKind::Bool | ParamKind::Long | ParamKind::Event => 1,
             ParamKind::Point2D => 2,
             ParamKind::Color => 4,
         }
@@ -81,7 +84,7 @@ impl ParamKind {
     /// std140/WGSL igazítás (float=4, vec2=8, vec4=16).
     pub fn alignment(self) -> usize {
         match self {
-            ParamKind::Float => 4,
+            ParamKind::Float | ParamKind::Bool | ParamKind::Long | ParamKind::Event => 4,
             ParamKind::Point2D => 8,
             ParamKind::Color => 16,
         }
@@ -89,7 +92,7 @@ impl ParamKind {
 
     pub fn size(self) -> usize {
         match self {
-            ParamKind::Float => 4,
+            ParamKind::Float | ParamKind::Bool | ParamKind::Long | ParamKind::Event => 4,
             ParamKind::Point2D => 8,
             ParamKind::Color => 16,
         }
@@ -105,6 +108,7 @@ pub struct Param {
     pub max: f32,
     pub default: [f32; 4],
     pub labels: Vec<String>,
+    pub values: Vec<f32>,
     /// Eltolás az uniform pufferben.
     pub offset: usize,
 }
@@ -113,6 +117,9 @@ pub struct Param {
 fn param_kind(kind: &str) -> Option<ParamKind> {
     match kind {
         "float" => Some(ParamKind::Float),
+        "bool" => Some(ParamKind::Bool),
+        "long" => Some(ParamKind::Long),
+        "event" => Some(ParamKind::Event),
         "point2D" => Some(ParamKind::Point2D),
         "color" => Some(ParamKind::Color),
         _ => None,
@@ -161,11 +168,15 @@ impl IsfShader {
     }
 
     /// A paraméterek aktuális értékei egy f32 pufferbe írva (uniform feltöltéshez).
+    ///
+    /// A `frame` = [frame_index, pass_index, opacity, alpha_mode]. Az alpha_mode
+    /// 1.0 esetén a réteg alpha-ja a fedést adja (opacity), 0.0 esetén a shader
+    /// saját alpha-ja érvényesül (kulcsozáshoz / átlátszáshoz).
     pub fn write_uniform_block(
         &self,
         buffer: &mut [u8],
         values: &[[f32; 4]],
-        frame: (f32, f32, f32),
+        frame: [f32; 4],
         resolution: [f32; 2],
         time: f32,
         delta: f32,
@@ -180,7 +191,7 @@ impl IsfShader {
         };
         // A fejléc: 2 db vec4 (render info + frame info).
         put(buffer, 0, &[resolution[0], resolution[1], time, delta]);
-        put(buffer, 16, &[frame.0, frame.1, frame.2, 0.0]);
+        put(buffer, 16, &frame);
         for (i, p) in self.params.iter().enumerate() {
             let v = values.get(i).copied().unwrap_or(p.default);
             put(buffer, p.offset, &v[..p.kind.components()]);
@@ -242,13 +253,36 @@ fn build_params(metadata: &Metadata) -> Result<(Vec<Param>, Vec<String>)> {
         if default[3] == 0.0 && kind == ParamKind::Color {
             default[3] = 1.0;
         }
+        let labels = input.labels.clone().unwrap_or_default();
+        let values: Vec<f32> = input
+            .values
+            .as_ref()
+            .map(|vs| vs.iter().map(|v| *v as f32).collect())
+            .unwrap_or_else(|| {
+                if kind == ParamKind::Long && !labels.is_empty() {
+                    (0..labels.len()).map(|i| i as f32).collect()
+                } else {
+                    Vec::new()
+                }
+            });
+        let min = input
+            .min
+            .map(|m| m as f32)
+            .or_else(|| values.iter().copied().reduce(f32::min))
+            .unwrap_or(0.0);
+        let max = input
+            .max
+            .map(|m| m as f32)
+            .or_else(|| values.iter().copied().reduce(f32::max))
+            .unwrap_or(1.0);
         params.push(Param {
             name: input.name.clone(),
             kind,
-            min: input.min.unwrap_or(0.0) as f32,
-            max: input.max.unwrap_or(1.0) as f32,
+            min,
+            max,
             default,
-            labels: input.labels.clone().unwrap_or_default(),
+            labels,
+            values,
             offset,
         });
         offset += kind.size();
@@ -294,12 +328,19 @@ pub fn translate(body: &str, params: &[Param], images: &[String]) -> Result<Stri
 
     let mut body = body.to_string();
     body = replace_word(&body, "gl_FragColor", "isf_FragColor");
+    body = replace_word(&body, "RENDERSIZE.xy", "_isf_render.xy");
+    body = replace_word(&body, "RENDERSIZE.x", "_isf_render.x");
+    body = replace_word(&body, "RENDERSIZE.y", "_isf_render.y");
     body = replace_word(&body, "RENDERSIZE", "_isf_render.xy");
     body = replace_word(&body, "TIMEDELTA", "_isf_render.w");
     body = replace_word(&body, "TIME", "_isf_render.z");
     body = replace_word(&body, "FRAMEINDEX", "int(_isf_frame.x)");
     body = replace_word(&body, "PASSINDEX", "int(_isf_frame.y)");
-    body = replace_word(&body, "gl_FragCoord.xy", "_isf_render.xy * isf_FragNormCoord");
+    body = replace_word(
+        &body,
+        "gl_FragCoord.xy",
+        "_isf_render.xy * isf_FragNormCoord",
+    );
     body = replace_word(&body, "isf_FragCoord", "_isf_render.xy * isf_FragNormCoord");
     body = replace_word(&body, "texture2D", "texture");
 
@@ -337,8 +378,9 @@ pub fn translate(body: &str, params: &[Param], images: &[String]) -> Result<Stri
     if !module.entry_points.iter().any(|e| e.name == "main") {
         bail!("nincs main() a shaderben");
     }
-    let mut wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
-        .map_err(|e| anyhow!("WGSL kiírás: {e:?}"))?;
+    let mut wgsl =
+        naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
+            .map_err(|e| anyhow!("WGSL kiírás: {e:?}"))?;
 
     // A stub-ok cseréje igazi mintavételre, és a bindingek beillesztése.
     // A paraméterek a 0-ás bindingen vannak, a képek 1/2, 3/4, ... párokat kapnak.
@@ -363,12 +405,19 @@ pub fn translate(body: &str, params: &[Param], images: &[String]) -> Result<Stri
     Ok(inject_layer_opacity(&wgsl))
 }
 
-/// A layer-opacity beillesztése a generált WGSL-be.
+/// A layer-alpha beillesztése a generált WGSL-be.
 ///
 /// A naga kimenete kiszámítható alakú: a fragment main a végén
 ///   return FragmentOutput(<expr>);
-/// formában tér vissza. Ezt cseréljük ki úgy, hogy az alpha az
-/// _isf_frame.z (layer-opacity) értékkel skálázódjon.
+/// formában tér vissza. Ezt cseréljük ki úgy, hogy az alpha:
+///   * fedés módban (`_isf_frame.w` = 1.0) = `_isf_frame.z` (layer-opacity),
+///     így 100%-on a réteg teljesen lefedi az alatta lévő képet;
+///   * shader alpha módban (`_isf_frame.w` = 0.0) = a shader saját alpha-ja
+///     szorozva az opacity-vel (kulcsozáshoz / átlátszáshoz).
+///
+/// Az értéket előbb egy `let`-be kötjük, hogy a shader kimenetét csak
+/// egyszer értékeljük ki (a naga kimenete gyakran egy `let` változó, de
+/// nem garantált).
 fn inject_layer_opacity(wgsl: &str) -> String {
     let needle = "return FragmentOutput(";
     let Some(pos) = wgsl.rfind(needle) else {
@@ -379,10 +428,12 @@ fn inject_layer_opacity(wgsl: &str) -> String {
         return wgsl.to_string();
     };
     let expr = &rest[..end];
-    let mut out = String::with_capacity(wgsl.len() + 80);
+    let mut out = String::with_capacity(wgsl.len() + 160);
     out.push_str(&wgsl[..pos]);
     out.push_str(&format!(
-        "return FragmentOutput(vec4<f32>({expr}.rgb, {expr}.a * global._isf_frame.z));"
+        "let isf_layer_color = {expr};\n    \
+         return FragmentOutput(vec4<f32>(isf_layer_color.rgb, \
+         mix(isf_layer_color.a, 1.0, global._isf_frame.w) * global._isf_frame.z));"
     ));
     out.push_str(&rest[end + 2..]);
     out
@@ -507,7 +558,6 @@ void main() {
         assert!(shader.wgsl_fragment.contains("textureSample(isf_tex_0"));
     }
 
-
     const GRADIENT: &str = r#"/*{
   "DESCRIPTION": "Teszt gradiens",
   "ISFVSN": "2",
@@ -559,7 +609,11 @@ void main() {
     #[test]
     fn translates_gradient_to_wgsl() {
         let s = IsfShader::from_source(GRADIENT, PathBuf::from("test.isf")).unwrap();
-        assert!(s.wgsl_fragment.contains("isf_FragColor"), "{}", s.wgsl_fragment);
+        assert!(
+            s.wgsl_fragment.contains("isf_FragColor"),
+            "{}",
+            s.wgsl_fragment
+        );
         assert!(s.wgsl_fragment.contains("speed"), "{}", s.wgsl_fragment);
         assert!(s.wgsl_fragment.contains("@fragment"), "{}", s.wgsl_fragment);
     }
@@ -582,6 +636,24 @@ void main() {
     }
 
     #[test]
+    fn layer_alpha_mode_is_uniform_controlled() {
+        let s = IsfShader::from_source(GRADIENT, PathBuf::from("teszt.isf")).unwrap();
+        let w = &s.wgsl_fragment;
+        assert!(
+            w.contains("_isf_frame.w"),
+            "nincs alpha-mód uniform a generált WGSL-ben:\n{w}"
+        );
+        assert!(
+            w.contains("mix(isf_layer_color.a, 1.0, global._isf_frame.w)"),
+            "az alpha nincs a fedés/shader-alpha mód szerint keverve:\n{w}"
+        );
+        assert!(
+            w.contains("* global._isf_frame.z"),
+            "az opacity szorzás hiányzik:\n{w}"
+        );
+    }
+
+    #[test]
     fn image_inputs_are_skipped_not_fatal() {
         let src = r#"/*{
   "INPUTS": [
@@ -600,15 +672,14 @@ void main() { gl_FragColor = vec4(k, 0.0, 0.0, 1.0); }
 #[cfg(test)]
 mod wgsl_dump {
 
-#[test]
-fn dump_wgsl_shape() {
-    let src = r#"/*{
+    #[test]
+    fn dump_wgsl_shape() {
+        let src = r#"/*{
   "INPUTS": [ { "NAME": "k", "TYPE": "float", "DEFAULT": 1.0 } ]
 }*/
 void main() { gl_FragColor = vec4(k, 0.5, 0.2, 1.0); }
 "#;
-    let s = crate::isf::IsfShader::from_source(src, std::path::PathBuf::from("t.isf")).unwrap();
-    println!("--- WGSL ---\n{}", s.wgsl_fragment);
-}
-
+        let s = crate::isf::IsfShader::from_source(src, std::path::PathBuf::from("t.isf")).unwrap();
+        println!("--- WGSL ---\n{}", s.wgsl_fragment);
+    }
 }

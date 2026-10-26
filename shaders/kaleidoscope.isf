@@ -1,0 +1,33 @@
+/*{
+    "DESCRIPTION": "Kaleidoszkóp — tükrözött szegmensek, forgatás és zoom",
+    "CREDIT": "Dada VJ",
+    "ISFVSN": "2",
+    "CATEGORIES": [ "Effect" ],
+    "INPUTS": [
+        { "NAME": "inputImage", "TYPE": "image" },
+        { "NAME": "segments", "TYPE": "float", "DEFAULT": 6.0, "MIN": 2.0, "MAX": 24.0 },
+        { "NAME": "zoom", "TYPE": "float", "DEFAULT": 1.0, "MIN": 0.2, "MAX": 3.0 },
+        { "NAME": "rotation", "TYPE": "float", "DEFAULT": 0.0, "MIN": -180.0, "MAX": 180.0 },
+        { "NAME": "spin_speed", "TYPE": "float", "DEFAULT": 0.2, "MIN": -2.0, "MAX": 2.0 },
+        { "NAME": "center", "TYPE": "point2D", "DEFAULT": [ 0.5, 0.5 ], "MIN": 0.0, "MAX": 1.0 }
+    ]
+}*/
+
+void main() {
+    vec2 p = isf_FragNormCoord - center;
+    float aspect = RENDERSIZE.x / max(RENDERSIZE.y, 1.0);
+    p.x *= aspect;
+
+    float r = length(p) / max(zoom, 0.05);
+    float a = atan(p.y, p.x) + rotation * 0.0174532925 + TIME * spin_speed;
+
+    float seg = max(floor(segments), 2.0);
+    float tau = 6.28318530718;
+    float slice = tau / seg;
+    a = mod(a, slice);
+    a = abs(a - slice * 0.5);
+
+    vec2 uv = center + vec2(cos(a), sin(a)) * r;
+    uv = abs(fract(uv * 0.5 + 0.5) * 2.0 - 1.0);
+    gl_FragColor = texture2D(inputImage, clamp(uv, 0.0, 1.0));
+}

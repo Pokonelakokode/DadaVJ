@@ -44,6 +44,50 @@ struct Uniforms {
     resolution: [f32; 2],
     time: f32,
     beat: f32,
+    opacity: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+
+/// Beépített Master Post-FX paraméterek (villantás, színforgatás, invert, telítettség, kontraszt, RGB split).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MasterFxParams {
+    pub flash: f32,
+    pub invert: f32,
+    pub hue: f32,
+    pub saturation: f32,
+    pub contrast: f32,
+    pub rgb_split: f32,
+    pub _pad0: f32,
+    pub _pad1: f32,
+}
+
+impl Default for MasterFxParams {
+    fn default() -> Self {
+        Self {
+            flash: 0.0,
+            invert: 0.0,
+            hue: 0.0,
+            saturation: 1.0,
+            contrast: 1.0,
+            rgb_split: 0.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
+        }
+    }
+}
+
+impl MasterFxParams {
+    pub fn is_active(&self) -> bool {
+        self.flash > 0.001
+            || self.invert > 0.001
+            || self.hue.abs() > 0.001
+            || (self.saturation - 1.0).abs() > 0.001
+            || (self.contrast - 1.0).abs() > 0.001
+            || self.rgb_split.abs() > 0.0001
+    }
 }
 
 enum Target {
@@ -68,12 +112,20 @@ struct Timers {
     flush: wgpu::Buffer,
 }
 
+struct PostFxTarget {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+    size: (u32, u32),
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     proc_pipelines: [wgpu::RenderPipeline; 4],
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
+    proc_opacity: f32,
     target: Target,
     format: wgpu::TextureFormat,
     adapter_name: String,
@@ -83,6 +135,11 @@ pub struct Renderer {
     video_sampler: wgpu::Sampler,
     video_pipelines: [wgpu::RenderPipeline; 4],
     video_params: wgpu::Buffer,
+    post_fx_pipeline: wgpu::RenderPipeline,
+    post_fx_buffer: wgpu::Buffer,
+    master_fx: MasterFxParams,
+    post_fx_main: Option<PostFxTarget>,
+    post_fx_preview: Option<PostFxTarget>,
     preview: Option<PreviewTarget>,
     /// A "lentebbi rétegek" célpontja: az ISF effekt képi bemenete.
     input_target: Option<InputTarget>,
@@ -146,6 +203,8 @@ impl Renderer {
         let proc_pipelines = create_proc_pipelines(&device, format);
         let (video_bgl, video_sampler, video_pipelines, video_params) =
             create_video_resources(&device, format);
+        let (post_fx_pipeline, post_fx_buffer) =
+            create_post_fx_resources(&device, format, &video_bgl);
         let (uniform_buffer, bind_group) = create_uniforms(&device, width, height);
 
         let config = wgpu::SurfaceConfiguration {
@@ -170,6 +229,7 @@ impl Renderer {
             proc_pipelines,
             bind_group,
             uniform_buffer,
+            proc_opacity: 1.0,
             target: Target::Surface { surface, config },
             format,
             adapter_name,
@@ -179,6 +239,11 @@ impl Renderer {
             video_sampler,
             video_pipelines,
             video_params,
+            post_fx_pipeline,
+            post_fx_buffer,
+            master_fx: MasterFxParams::default(),
+            post_fx_main: None,
+            post_fx_preview: None,
             preview: None,
             input_target: None,
         })
@@ -242,6 +307,8 @@ impl Renderer {
         let proc_pipelines = create_proc_pipelines(&device, format);
         let (video_bgl, video_sampler, video_pipelines, video_params) =
             create_video_resources(&device, format);
+        let (post_fx_pipeline, post_fx_buffer) =
+            create_post_fx_resources(&device, format, &video_bgl);
         let (uniform_buffer, bind_group) = create_uniforms(&device, width, height);
 
         Ok(Self {
@@ -250,6 +317,7 @@ impl Renderer {
             proc_pipelines,
             bind_group,
             uniform_buffer,
+            proc_opacity: 1.0,
             target: Target::Offscreen {
                 _texture: texture,
                 view,
@@ -263,9 +331,22 @@ impl Renderer {
             video_sampler,
             video_pipelines,
             video_params,
+            post_fx_pipeline,
+            post_fx_buffer,
+            master_fx: MasterFxParams::default(),
+            post_fx_main: None,
+            post_fx_preview: None,
             preview: None,
             input_target: None,
         })
+    }
+
+    pub fn set_proc_opacity(&mut self, opacity: f32) {
+        self.proc_opacity = opacity.clamp(0.0, 1.0);
+    }
+
+    pub fn set_master_fx(&mut self, params: MasterFxParams) {
+        self.master_fx = params;
     }
 
     pub fn adapter_name(&self) -> &str {
@@ -336,12 +417,13 @@ impl Renderer {
         beat: f32,
         layers: &[LayerRef],
     ) {
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("record-encoder"),
-                });
-        self.draw(&mut encoder, view, size, time, beat, layers);
+        self.ensure_post_fx_target(size, false);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("record-encoder"),
+            });
+        self.draw_final(&mut encoder, view, size, time, beat, layers, false);
         self.queue.submit(Some(encoder.finish()));
     }
 
@@ -353,14 +435,17 @@ impl Renderer {
         &self.queue
     }
 
-    /// Egy 16 bájtos layer-params puffer létrehozása (opacity).
+    /// Layer-params puffer létrehozása (32 bájt: opacity + deckenkénti chroma key).
     pub fn create_layer_params(&self) -> wgpu::Buffer {
-        self.device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("layer-params"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        })
+        });
+        // Nullázás: a key_enabled mező véletlen szemét ne kapcsolja be a kulcsolást.
+        self.queue.write_buffer(&buffer, 0, &[0u8; 32]);
+        buffer
     }
 
     /// Bind group egy videó-frame textúrához (textúra + sampler + opacity).
@@ -429,11 +514,115 @@ impl Renderer {
         }
     }
 
+    pub fn set_vsync(&mut self, vsync: bool) {
+        if let Target::Surface { surface, config } = &mut self.target {
+            config.present_mode = if vsync {
+                wgpu::PresentMode::AutoVsync
+            } else {
+                wgpu::PresentMode::AutoNoVsync
+            };
+            surface.configure(&self.device, config);
+        }
+    }
+
     pub fn reconfigure(&mut self) {
         if let Target::Surface { surface, config } = &self.target {
             log::warn!("surface újrakonfigurálása");
             surface.configure(&self.device, config);
         }
+    }
+
+    fn ensure_post_fx_target(&mut self, size: (u32, u32), is_preview: bool) {
+        if !self.master_fx.is_active() || size.0 == 0 || size.1 == 0 {
+            return;
+        }
+        let matches = if is_preview {
+            self.post_fx_preview
+                .as_ref()
+                .map(|t| t.size == size)
+                .unwrap_or(false)
+        } else {
+            self.post_fx_main
+                .as_ref()
+                .map(|t| t.size == size)
+                .unwrap_or(false)
+        };
+        if matches {
+            return;
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("post-fx-scene"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.make_video_bind_group(&view, &self.post_fx_buffer);
+        let target = PostFxTarget {
+            _texture: texture,
+            view,
+            bind_group,
+            size,
+        };
+        if is_preview {
+            self.post_fx_preview = Some(target);
+        } else {
+            self.post_fx_main = Some(target);
+        }
+    }
+
+    fn draw_final(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        size: (u32, u32),
+        time: f32,
+        beat: f32,
+        layers: &[LayerRef],
+        is_preview: bool,
+    ) {
+        let fx_target = if self.master_fx.is_active() {
+            if is_preview {
+                self.post_fx_preview.as_ref()
+            } else {
+                self.post_fx_main.as_ref()
+            }
+        } else {
+            None
+        };
+        let Some(fx_target) = fx_target else {
+            self.draw(encoder, view, size, time, beat, layers);
+            return;
+        };
+
+        self.draw(encoder, &fx_target.view, size, time, beat, layers);
+        self.queue
+            .write_buffer(&self.post_fx_buffer, 0, bytemuck::bytes_of(&self.master_fx));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("post-fx-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.post_fx_pipeline);
+        pass.set_bind_group(0, &fx_target.bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// Egy frame renderelése. Surface esetén presentál, offscreen esetén nem.
@@ -443,18 +632,28 @@ impl Renderer {
         beat: f32,
         layers: &[LayerRef],
     ) -> Result<(), wgpu::SurfaceError> {
+        let cur_size = self.size();
+        self.ensure_post_fx_target(cur_size, false);
         match &self.target {
             Target::Surface { surface, config } => {
                 let frame = surface.get_current_texture()?;
                 let view = frame
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
-                let mut encoder = self
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("frame"),
-                    });
-                self.draw(&mut encoder, &view, (config.width, config.height), time, beat, layers);
+                let mut encoder =
+                    self.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("frame"),
+                        });
+                self.draw_final(
+                    &mut encoder,
+                    &view,
+                    (config.width, config.height),
+                    time,
+                    beat,
+                    layers,
+                    false,
+                );
                 self.queue.submit(Some(encoder.finish()));
                 frame.present();
                 Ok(())
@@ -465,7 +664,7 @@ impl Renderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frame-offscreen"),
                         });
-                self.draw(&mut encoder, view, *size, time, beat, layers);
+                self.draw_final(&mut encoder, view, *size, time, beat, layers, false);
                 self.queue.submit(Some(encoder.finish()));
                 Ok(())
             }
@@ -530,6 +729,10 @@ impl Renderer {
             resolution: [size.0 as f32, size.1 as f32],
             time,
             beat,
+            opacity: self.proc_opacity,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -633,6 +836,7 @@ impl Renderer {
         beat: f32,
     ) -> Option<Vec<u8>> {
         let (pw, ph) = (640u32, 360u32);
+        self.ensure_post_fx_target((pw, ph), true);
         if self.preview.is_none() {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("preview"),
@@ -675,7 +879,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("preview"),
             });
-        self.draw(&mut encoder, &preview.view, size, time, beat, layers);
+        self.draw_final(&mut encoder, &preview.view, size, time, beat, layers, true);
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
                 texture: &preview.texture,
@@ -900,13 +1104,62 @@ fn create_video_resources(
             cache: None,
         })
     });
+    // 32 bájt: opacity + chroma key mezők (a tényleges layer-puffereket a
+    // hívó hozza létre; ez csak a layout-hoz tartozó alapértelmezett puffer).
     let video_params = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("video-params"),
-        size: 16,
+        size: 32,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     (video_bgl, video_sampler, video_pipelines, video_params)
+}
+
+fn create_post_fx_resources(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    video_bgl: &wgpu::BindGroupLayout,
+) -> (wgpu::RenderPipeline, wgpu::Buffer) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("post-fx-shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("post-fx-pipeline-layout"),
+        bind_group_layouts: &[video_bgl],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("post-fx-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_video"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_post_fx"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("post-fx-params"),
+        contents: bytemuck::bytes_of(&MasterFxParams::default()),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    (pipeline, buffer)
 }
 
 fn create_proc_pipelines(
@@ -975,6 +1228,10 @@ fn create_uniforms(
             resolution: [width as f32, height as f32],
             time: 0.0,
             beat: 0.0,
+            opacity: 1.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
         }),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });

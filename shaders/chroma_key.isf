@@ -1,0 +1,50 @@
+/*{
+    "DESCRIPTION": "Chroma Key / Színkulcs — a kiválasztott kulcsszín (alapból zöld) kivétele a képből, lágy széllel és spill-korrektővel",
+    "CREDIT": "Dada VJ",
+    "ISFVSN": "2",
+    "CATEGORIES": [ "Effect" ],
+    "INPUTS": [
+        { "NAME": "inputImage", "TYPE": "image" },
+        { "NAME": "key_color", "TYPE": "color", "DEFAULT": [ 0.0, 1.0, 0.0, 1.0 ] },
+        { "NAME": "tolerance", "TYPE": "float", "DEFAULT": 0.28, "MIN": 0.0, "MAX": 1.0 },
+        { "NAME": "softness", "TYPE": "float", "DEFAULT": 0.12, "MIN": 0.0, "MAX": 0.5 },
+        { "NAME": "spill", "TYPE": "float", "DEFAULT": 0.35, "MIN": 0.0, "MAX": 1.0 },
+        { "NAME": "invert", "TYPE": "bool", "DEFAULT": false }
+    ]
+}*/
+
+float luma(vec3 c) {
+    return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+// Színtávolság a Cb/Cr (krominancia) síkban; a luma különbség csak kis súlyt kap,
+// így a megvilágítás ingadozása nem töri el a kulcsozást.
+float chroma_distance(vec3 a, vec3 b) {
+    float ya = luma(a);
+    float yb = luma(b);
+    vec2 ca = vec2((a.b - ya) * 0.564, (a.r - ya) * 0.713);
+    vec2 cb = vec2((b.b - yb) * 0.564, (b.r - yb) * 0.713);
+    return length(ca - cb) + abs(ya - yb) * 0.25;
+}
+
+void main() {
+    vec4 src_col = texture2D(inputImage, isf_FragNormCoord);
+    vec3 rgb = src_col.rgb;
+
+    float dist = chroma_distance(rgb, key_color.rgb);
+    float soft = max(softness, 0.0001);
+    // A tolerance alatt kulcsszín (alpha 0), felette megtartott kép (alpha 1);
+    // a softness szélességű sávban lágy az átmenet.
+    float mask = smoothstep(tolerance, tolerance + soft + 0.0001, dist);
+
+    // invert: nem a kulcsszínt, hanem a környezetét tartjuk meg.
+    mask = mix(mask, 1.0 - mask, clamp(invert, 0.0, 1.0));
+
+    // Spill-korrektő: a kulcsszínhez közeli, de megtartott pixelek telítettségét
+    // a luma felé húzzuk — a zöld visszaverődés nem látszik a széleken.
+    float spill_weight = 1.0 - smoothstep(tolerance, tolerance + soft + 0.25, dist);
+    vec3 desat = mix(rgb, vec3(luma(rgb)), clamp(spill * spill_weight, 0.0, 1.0));
+
+    // Az alpha a kulcs: a motor "shader alpha" módban ebből kulcsoz.
+    gl_FragColor = vec4(clamp(desat, 0.0, 1.0), clamp(mask, 0.0, 1.0));
+}

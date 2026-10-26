@@ -8,6 +8,10 @@ struct Uniforms {
     resolution : vec2<f32>,
     time : f32,
     beat : f32,
+    opacity : f32,
+    _pad0 : f32,
+    _pad1 : f32,
+    _pad2 : f32,
 };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;
@@ -41,13 +45,38 @@ struct VOut {
 @group(0) @binding(0) var video_tex : texture_2d<f32>;
 @group(0) @binding(1) var video_sampler : sampler;
 
+// A videó-réteg paraméterei: 32 bájt (opacity + deckenkénti chroma key).
 struct VideoParams {
     opacity : f32,
-    _pad0 : f32,
-    _pad1 : f32,
-    _pad2 : f32,
+    key_enabled : f32,
+    tolerance : f32,
+    softness : f32,
+    // A kivett kulcsszín sRGB-ben (a színválasztóból, 0..1).
+    key_color : vec3<f32>,
+    spill : f32,
 };
 @group(0) @binding(2) var<uniform> video_params : VideoParams;
+
+// Linear -> sRGB kódolás, hogy a kulcsszín-összehasonlítás a színválasztó
+// értékeivel (sRGB) konzisztens legyen.
+fn linear_to_srgb(c : vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+fn chroma_luma(c : vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+// Krominancia-távolság a Cb/Cr síkban; a luma különbség csak kis súlyt kap.
+fn chroma_distance(a : vec3<f32>, b : vec3<f32>) -> f32 {
+    let ya = chroma_luma(a);
+    let yb = chroma_luma(b);
+    let ca = vec2<f32>((a.b - ya) * 0.564, (a.r - ya) * 0.713);
+    let cb = vec2<f32>((b.b - yb) * 0.564, (b.r - yb) * 0.713);
+    return length(ca - cb) + abs(ya - yb) * 0.25;
+}
 
 struct VOutVideo {
     @builtin(position) pos : vec4<f32>,
@@ -71,8 +100,37 @@ fn vs_video(@builtin(vertex_index) vi : u32) -> VOutVideo {
 @fragment
 fn fs_video(in : VOutVideo) -> @location(0) vec4<f32> {
     let c = textureSample(video_tex, video_sampler, in.uv);
-    // Az alpha hordozza a layer-opacity-t (a blend src=SrcAlpha-t használ).
-    return vec4<f32>(c.rgb, video_params.opacity);
+    var rgb = c.rgb;
+    var alpha = video_params.opacity;
+
+    // Deck-szintű chroma key: a kulcsszínhez közeli pixelek átlátszóvá válnak,
+    // így az alatta lévő deck/kompozit látszik (ArKaOS-stílus).
+    if (video_params.key_enabled > 0.5) {
+        let srgb = linear_to_srgb(c.rgb);
+        let dist = chroma_distance(srgb, video_params.key_color);
+        let soft = max(video_params.softness, 0.0001);
+        // tolerance alatt kulcsszín (alpha 0), felette megtartott kép (alpha 1).
+        let mask = smoothstep(
+            video_params.tolerance,
+            video_params.tolerance + soft + 0.0001,
+            dist
+        );
+        // Despill: a kulcsszínhez közeli megtartott pixelek telítettségét
+        // a luma felé húzzuk (a szélén maradó szín visszaverődés eltűnik).
+        let spill_w = 1.0 - smoothstep(
+            video_params.tolerance,
+            video_params.tolerance + soft + 0.25,
+            dist
+        );
+        // A despill a lineáris RGB tényleges luminanciája felé húz (a
+        // távolság-számítás viszont szándékosan sRGB-ben történik).
+        let lum = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let desat = mix(rgb, vec3<f32>(lum), clamp(spill_w * video_params.spill, 0.0, 1.0));
+        rgb = desat;
+        alpha = video_params.opacity * mask;
+    }
+    // Az alpha hordozza a layer-opacity-t (és a chroma maszkot).
+    return vec4<f32>(rgb, alpha);
 }
 
 @vertex
@@ -121,8 +179,8 @@ fn fs_main(in : VOut) -> @location(0) vec4<f32> {
         col = vec3<f32>(0.9, 0.25, 0.1);
     }
 
-    let alpha = select(1.0, 0.6, in.layer > 0u);
-    return vec4<f32>(col, alpha);
+    let base_alpha = select(1.0, 0.6, in.layer > 0u);
+    return vec4<f32>(col, base_alpha * u.opacity);
 }
 
 // ---------------------------------------------------------------------------
@@ -214,4 +272,68 @@ fn fs_audio(in : VOutAudio) -> @location(0) vec4<f32> {
     // Az alpha = layer-opacity (a resolution.z-ben érkezik).
     return vec4<f32>(c, au.resolution.z);
 }
+
+// ---------------------------------------------------------------------------
+// Beépített Master Post-FX (Color, Flash, Invert, Hue, Saturation, Contrast, RGB Split)
+// ---------------------------------------------------------------------------
+
+struct MasterFxParams {
+    flash : f32,
+    invert : f32,
+    hue : f32,
+    saturation : f32,
+    contrast : f32,
+    rgb_split : f32,
+    _pad0 : f32,
+    _pad1 : f32,
+};
+
+@group(0) @binding(0) var post_tex : texture_2d<f32>;
+@group(0) @binding(1) var post_sampler : sampler;
+@group(0) @binding(2) var<uniform> post_fx : MasterFxParams;
+
+@fragment
+fn fs_post_fx(in : VOutVideo) -> @location(0) vec4<f32> {
+    let uv = in.uv;
+    let split = post_fx.rgb_split;
+    var col : vec3<f32>;
+    if (abs(split) > 0.0001) {
+        let r = textureSample(post_tex, post_sampler, clamp(uv + vec2<f32>(split, 0.0), vec2<f32>(0.0), vec2<f32>(1.0))).r;
+        let g = textureSample(post_tex, post_sampler, uv).g;
+        let b = textureSample(post_tex, post_sampler, clamp(uv - vec2<f32>(split, 0.0), vec2<f32>(0.0), vec2<f32>(1.0))).b;
+        col = vec3<f32>(r, g, b);
+    } else {
+        col = textureSample(post_tex, post_sampler, uv).rgb;
+    }
+
+    // Kontraszt
+    col = (col - vec3<f32>(0.5)) * post_fx.contrast + vec3<f32>(0.5);
+
+    // Telítettség (Saturation)
+    let luma = dot(col, vec3<f32>(0.299, 0.587, 0.114));
+    col = mix(vec3<f32>(luma), col, post_fx.saturation);
+
+    // Színárnyalat-forgatás (Hue Shift)
+    if (abs(post_fx.hue) > 0.001) {
+        let angle = post_fx.hue * 6.2831853;
+        let k = vec3<f32>(0.57735026, 0.57735026, 0.57735026);
+        let cos_a = cos(angle);
+        col = col * cos_a + cross(k, col) * sin(angle) + k * dot(k, col) * (1.0 - cos_a);
+    }
+
+    col = clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    // Invertálás
+    if (post_fx.invert > 0.001) {
+        col = mix(col, vec3<f32>(1.0) - col, clamp(post_fx.invert, 0.0, 1.0));
+    }
+
+    // Villantás (Strobe / Flash)
+    if (post_fx.flash > 0.001) {
+        col = mix(col, vec3<f32>(1.0), clamp(post_fx.flash, 0.0, 1.0));
+    }
+
+    return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+
 

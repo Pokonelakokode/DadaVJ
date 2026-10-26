@@ -1,0 +1,33 @@
+/*{
+    "DESCRIPTION": "Neon Alagút (Tunnel) — 3D hipnotikus geometria",
+    "CREDIT": "Dada VJ",
+    "ISFVSN": "2",
+    "CATEGORIES": [ "Generator" ],
+    "INPUTS": [
+        { "NAME": "speed", "TYPE": "float", "DEFAULT": 1.2, "MIN": -4.0, "MAX": 4.0 },
+        { "NAME": "twist", "TYPE": "float", "DEFAULT": 1.5, "MIN": -6.0, "MAX": 6.0 },
+        { "NAME": "rings", "TYPE": "float", "DEFAULT": 8.0, "MIN": 2.0, "MAX": 24.0 },
+        { "NAME": "spokes", "TYPE": "float", "DEFAULT": 8.0, "MIN": 2.0, "MAX": 24.0 },
+        { "NAME": "colorA", "TYPE": "color", "DEFAULT": [ 0.0, 0.9, 1.0, 1.0 ] },
+        { "NAME": "colorB", "TYPE": "color", "DEFAULT": [ 1.0, 0.1, 0.6, 1.0 ] }
+    ]
+}*/
+
+void main() {
+    vec2 p = isf_FragNormCoord * 2.0 - 1.0;
+    p.x *= RENDERSIZE.x / max(RENDERSIZE.y, 1.0);
+    p += 0.12 * vec2(sin(TIME * 0.8), cos(TIME * 0.6));
+
+    float r = max(length(p), 0.001);
+    float a = atan(p.y, p.x);
+    float z = 0.35 / r + TIME * speed;
+
+    float ring_pat = abs(sin(z * rings));
+    float spoke_pat = abs(sin(a * floor(spokes) + z * twist));
+    float grid = smoothstep(0.85, 0.98, ring_pat) + smoothstep(0.88, 0.99, spoke_pat);
+
+    float fog = smoothstep(0.02, 0.65, r);
+    vec3 col = mix(colorA.rgb, colorB.rgb, 0.5 + 0.5 * sin(z * 0.7)) * grid * fog;
+    col += colorB.rgb * (0.04 / (r + 0.05));
+    gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+}

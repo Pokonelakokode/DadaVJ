@@ -29,7 +29,7 @@ pub struct Event {
 
 #[derive(Default)]
 struct Incoming {
-    packets: Mutex<Vec<(u64, Vec<u8>)>>,
+    packets: Mutex<Vec<(usize, u64, Vec<u8>)>>,
     dropped: Mutex<u64>,
 }
 
@@ -39,10 +39,15 @@ pub struct MidiEngine {
     pub clock: ClockPll,
     pub transport: Transport,
     pub sources: Vec<String>,
+    /// Ha `Some`, csak a felsorolt nevű portokról fogadunk üzenetet; ha `None`, mindről.
+    pub enabled_ports: Option<Vec<String>>,
     pub events: Vec<Event>,
     pub mappings: Vec<Mapping>,
     pub messages_in: u64,
     pub clock_ticks: u64,
+    /// Utoljára beérkezett nem-clock MIDI esemény: (port_név, üzenet, sorszám).
+    pub last_event: Option<(String, MidiMessage, u64)>,
+    last_event_seq: u64,
     last_clock_tick: f64,
     last_bpm_applied: f32,
     incoming: Arc<Incoming>,
@@ -63,10 +68,13 @@ impl MidiEngine {
             clock: ClockPll::new(96, 120.0),
             transport: Transport::new(120.0),
             sources: Vec::new(),
+            enabled_ports: None,
             events: Vec::new(),
             mappings: Vec::new(),
             messages_in: 0,
             clock_ticks: 0,
+            last_event: None,
+            last_event_seq: 0,
             last_clock_tick: 0.0,
             last_bpm_applied: 120.0,
             incoming: Arc::new(Incoming::default()),
@@ -93,6 +101,8 @@ impl MidiEngine {
 
     /// Csatlakozás az összes elérhető bemenethez (több forrás egyszerre).
     pub fn open_all(&mut self) -> Result<Vec<String>> {
+        self.connections.clear();
+        self.sources.clear();
         // A midir MidiInput-ja egy kapcsolatot kezel (connect self-et fogyaszt),
         // ezért portonként külön példányt hozunk létre.
         let port_count = midir::MidiInput::new("dada-vj")?.ports().len();
@@ -100,10 +110,13 @@ impl MidiEngine {
         for index in 0..port_count {
             let midi_in = midir::MidiInput::new("dada-vj")?;
             let ports = midi_in.ports();
-            let Some(port) = ports.get(index) else { continue };
+            let Some(port) = ports.get(index) else {
+                continue;
+            };
             let name = midi_in
                 .port_name(port)
                 .unwrap_or_else(|_| format!("port {index}"));
+            let source_idx = names.len();
             let incoming = Arc::clone(&self.incoming);
             match midi_in.connect(
                 port,
@@ -111,7 +124,7 @@ impl MidiEngine {
                 move |timestamp_us, bytes, _| {
                     if let Ok(mut q) = incoming.packets.lock() {
                         if q.len() < 8192 {
-                            q.push((timestamp_us, bytes.to_vec()));
+                            q.push((source_idx, timestamp_us, bytes.to_vec()));
                         } else if let Ok(mut d) = incoming.dropped.lock() {
                             *d += 1;
                         }
@@ -130,20 +143,33 @@ impl MidiEngine {
         Ok(names)
     }
 
+    pub fn is_port_enabled(&self, source: usize) -> bool {
+        let Some(allowed) = &self.enabled_ports else {
+            return true;
+        };
+        let Some(name) = self.sources.get(source) else {
+            return true;
+        };
+        allowed.iter().any(|p| p == name)
+    }
+
     pub fn dropped_packets(&self) -> u64 {
         self.incoming.dropped.lock().map(|d| *d).unwrap_or(0)
     }
 
     /// Frame-enként hívandó: átveszi a hardveres byte-okat, majd lépteti az időt.
     pub fn tick(&mut self, now_secs: f64, dt_secs: f32) {
-        let packets: Vec<(u64, Vec<u8>)> = match self.incoming.packets.lock() {
+        let packets: Vec<(usize, u64, Vec<u8>)> = match self.incoming.packets.lock() {
             Ok(mut q) => q.drain(..).collect(),
             Err(_) => Vec::new(),
         };
-        for (_ts, bytes) in packets {
+        for (source, _ts, bytes) in packets {
+            if !self.is_port_enabled(source) {
+                continue;
+            }
             // A CoreMIDI időbélyeg helyett a monoton óránkat használjuk: a PLL
             // így is pontos, mert a tickek sűrűn érkeznek.
-            self.feed(0, &bytes, now_secs);
+            self.feed(source, &bytes, now_secs);
         }
         for m in self.mappings.iter_mut() {
             m.env.advance(dt_secs * 1000.0, &m.spec);
@@ -155,6 +181,19 @@ impl MidiEngine {
         let messages = self.parser.parse(bytes);
         for message in messages {
             self.messages_in += 1;
+            if matches!(
+                message,
+                MidiMessage::NoteOn { velocity, .. } if velocity > 0
+            ) || matches!(message, MidiMessage::ControlChange { .. })
+            {
+                self.last_event_seq += 1;
+                let port_name = self
+                    .sources
+                    .get(source)
+                    .cloned()
+                    .unwrap_or_else(|| format!("port {source}"));
+                self.last_event = Some((port_name, message, self.last_event_seq));
+            }
             self.handle(source, message, time_secs);
             self.events.push(Event {
                 source,
@@ -236,7 +275,7 @@ pub fn synthetic_clock(bpm: f64, seconds: f64, jitter: f64) -> Vec<(f64, Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mapping::{Trigger, EnvelopeSpec};
+    use crate::mapping::{EnvelopeSpec, Trigger};
 
     #[test]
     fn locks_to_clock_tempo() {
@@ -274,11 +313,23 @@ mod tests {
             attack_ms: 0.0,
             hold_ms: 0.0,
             decay_ms: 100.0,
+            sustain: 0.0,
+            release_ms: 150.0,
             curve: crate::mapping::Curve::Linear,
             retrigger: true,
         };
-        e.mappings
-            .push(Mapping::new(0, Trigger::Note { note: 36, channel: None }, "invert", 1.0).with_spec(spec));
+        e.mappings.push(
+            Mapping::new(
+                0,
+                Trigger::Note {
+                    note: 36,
+                    channel: None,
+                },
+                "invert",
+                1.0,
+            )
+            .with_spec(spec),
+        );
         e.feed(0, &[0x90, 36, 100], 0.0);
         assert!(e.mappings[0].value() > 0.9);
         e.tick(0.05, 0.05);
@@ -294,13 +345,19 @@ mod tests {
         let mut e = MidiEngine::new();
         e.mappings.push(Mapping::new(
             0,
-            Trigger::Note { note: 36, channel: None },
+            Trigger::Note {
+                note: 36,
+                channel: None,
+            },
             "a",
             1.0,
         ));
         e.mappings.push(Mapping::new(
             1,
-            Trigger::Note { note: 38, channel: None },
+            Trigger::Note {
+                note: 38,
+                channel: None,
+            },
             "b",
             1.0,
         ));

@@ -97,6 +97,8 @@ mod tests {
             attack_ms: 0.0,
             hold_ms: 0.0,
             decay_ms: 100.0,
+            sustain: 0.0,
+            release_ms: 150.0,
             curve: Curve::Linear,
             retrigger: true,
         };
@@ -116,6 +118,8 @@ mod tests {
             attack_ms: 0.0,
             hold_ms: 0.0,
             decay_ms: 100.0,
+            sustain: 0.0,
+            release_ms: 150.0,
             curve: Curve::Exponential,
             retrigger: true,
         };
@@ -132,6 +136,8 @@ mod tests {
             attack_ms: 100.0,
             hold_ms: 0.0,
             decay_ms: 100.0,
+            sustain: 0.0,
+            release_ms: 150.0,
             curve: Curve::Linear,
             retrigger: true,
         };

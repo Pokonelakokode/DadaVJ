@@ -14,4 +14,6 @@ pub use analysis::{
     Analyzer, AudioState, BANDS, FFT_SIZE, SPECTROGRAM_COLS, SPECTROGRAM_ROWS, SPECTRUM_BINS,
     WAVEFORM_SAMPLES,
 };
-pub use source::{AnalyzerSnapshot, AudioEngine, SourceKind};
+pub use source::{
+    AnalyzerSnapshot, AudioDeviceInfo, AudioEngine, ChannelMeter, SourceKind, MAX_CHANNELS,
+};

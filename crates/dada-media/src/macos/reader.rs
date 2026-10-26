@@ -15,7 +15,7 @@ use objc2_av_foundation::{
 };
 use objc2::runtime::AnyObject;
 use objc2_core_foundation::CFRetained;
-use objc2_core_media::CMSampleBufferGetPresentationTimeStamp;
+use objc2_core_media::{CMSampleBufferGetPresentationTimeStamp, CMTime, CMTimeRange};
 use objc2_core_video::{
     kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferPixelFormatTypeKey, CVPixelBuffer,
     CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
@@ -94,6 +94,8 @@ pub struct VideoReader {
     height: u32,
     pub nominal_fps: f32,
     pub frame_count: u64,
+    /// A videósáv hossza másodpercben.
+    pub duration: f64,
 }
 
 impl VideoReader {
@@ -104,6 +106,29 @@ impl VideoReader {
 
     /// Megnyitás kért pixel-formátummal (pl. natív 420v a legolcsóbb úthoz).
     pub fn open_with_pixel_format(path: &Path, pixel_format: u32) -> Result<Self> {
+        Self::open_impl(path, pixel_format, None)
+    }
+
+    /// Megnyitás egy időablakra [start, start+duration) a reverse/bounce
+    /// lejátszáshoz. Az AVAssetReader a tartományon belül szekvenciálisan olvas.
+    pub fn open_range(
+        path: &Path,
+        pixel_format: u32,
+        start_secs: f64,
+        duration_secs: f64,
+    ) -> Result<Self> {
+        Self::open_impl(
+            path,
+            pixel_format,
+            Some((start_secs.max(0.0), duration_secs.max(0.001))),
+        )
+    }
+
+    fn open_impl(
+        path: &Path,
+        pixel_format: u32,
+        range: Option<(f64, f64)>,
+    ) -> Result<Self> {
         let path_str = path
             .to_str()
             .ok_or_else(|| anyhow!("nem UTF-8 útvonal: {path:?}"))?;
@@ -139,6 +164,11 @@ impl VideoReader {
             }
             let output: Retained<AVAssetReaderOutput> = track_output.into_super();
             reader.addOutput(&output);
+            if let Some((start_secs, duration_secs)) = range {
+                let start_time = CMTime::with_seconds(start_secs, 600);
+                let duration_time = CMTime::with_seconds(duration_secs, 600);
+                reader.setTimeRange(CMTimeRange::new(start_time, duration_time));
+            }
             if !reader.startReading() {
                 return Err(anyhow!(
                     "startReading sikertelen: {:?}",
@@ -148,6 +178,12 @@ impl VideoReader {
 
             let size = track.naturalSize();
             let nominal_fps = track.nominalFrameRate();
+            let range = track.timeRange();
+            let duration = if range.duration.timescale != 0 {
+                range.duration.value as f64 / range.duration.timescale as f64
+            } else {
+                0.0
+            };
 
             Ok(Self {
                 reader,
@@ -156,6 +192,7 @@ impl VideoReader {
                 height: size.height.max(0.0) as u32,
                 nominal_fps,
                 frame_count: 0,
+                duration,
             })
         }
     }
@@ -216,3 +253,27 @@ impl VideoReader {
 
 #[allow(dead_code)]
 fn _unused() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranged_reader_stays_inside_requested_window() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.testmedia/small.mov");
+        if !path.exists() {
+            return;
+        }
+        let mut reader = VideoReader::open_range(&path, PIXEL_FORMAT_BGRA, 1.0, 0.3)
+            .expect("range reader nyílik");
+        let mut count = 0;
+        while let Some(frame) = reader.next_frame().expect("olvasás") {
+            assert!(frame.pts_secs >= 0.95, "frame a range előtt: {}", frame.pts_secs);
+            count += 1;
+            if count >= 5 {
+                break;
+            }
+        }
+        assert!(count > 0, "nincs frame a kért időablakban");
+    }
+}

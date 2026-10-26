@@ -1,0 +1,24 @@
+version = 1
+shader = "shaders/color_strobe.isf"
+
+[output]
+size = "1920x1080"
+vsync = true
+serve = true
+port = 7777
+
+[audio]
+enabled = false
+
+[[decks]]
+folder = "videos"
+start_clip = 156
+autopilot = "shuffle"
+every_beats = 4.0
+quantize = "1"
+blend = "normal"
+opacity = 1.0
+fade_beats = 0.0
+
+[[mods]]
+route = "note:69->fx.flash:1:220:0:100:exponential:true"

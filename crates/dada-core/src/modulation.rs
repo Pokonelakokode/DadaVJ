@@ -27,6 +27,10 @@ pub struct EnvelopeSpec {
     pub attack_ms: f32,
     pub hold_ms: f32,
     pub decay_ms: f32,
+    /// A decay végén tartott szint (0..1). 0 = klasszikus one-shot lecsengés.
+    pub sustain: f32,
+    /// A note-off után a sustain szintről nullára csengés ideje.
+    pub release_ms: f32,
     pub curve: Curve,
     /// Ha igaz, egy új ütés újratölti a lecsengést közben is.
     pub retrigger: bool,
@@ -38,6 +42,8 @@ impl Default for EnvelopeSpec {
             attack_ms: 0.0,
             hold_ms: 0.0,
             decay_ms: 150.0,
+            sustain: 0.0,
+            release_ms: 150.0,
             curve: Curve::Exponential,
             retrigger: true,
         }
@@ -50,6 +56,8 @@ enum Phase {
     Attack,
     Hold,
     Decay,
+    Sustain,
+    Release,
 }
 
 /// Envelope-generátor: 0..1 értéket ad.
@@ -58,6 +66,8 @@ pub struct Envelope {
     pub value: f32,
     phase: Phase,
     elapsed_ms: f32,
+    /// A release kiinduló értéke (note-off pillanatában).
+    release_from: f32,
     pub triggers: u64,
 }
 
@@ -67,8 +77,17 @@ impl Default for Envelope {
             value: 0.0,
             phase: Phase::Idle,
             elapsed_ms: 0.0,
+            release_from: 0.0,
             triggers: 0,
         }
+    }
+}
+
+fn curve_envelope(t: f32, curve: Curve) -> f32 {
+    let x = (1.0 - t).clamp(0.0, 1.0);
+    match curve {
+        Curve::Linear => x,
+        Curve::Exponential => x * x,
     }
 }
 
@@ -79,6 +98,7 @@ impl Envelope {
         }
         self.phase = Phase::Attack;
         self.elapsed_ms = 0.0;
+        self.release_from = 0.0;
         self.triggers += 1;
         if spec.attack_ms <= 0.0 {
             self.value = 1.0;
@@ -90,9 +110,12 @@ impl Envelope {
         }
     }
 
+    /// Note-off: a sustain szintről induló release szakasz.
     pub fn release(&mut self) {
-        if self.phase != Phase::Idle {
-            self.phase = Phase::Decay;
+        if self.phase != Phase::Idle && self.phase != Phase::Release {
+            self.release_from = self.value.max(0.0);
+            self.phase = Phase::Release;
+            self.elapsed_ms = 0.0;
         }
     }
 
@@ -123,10 +146,30 @@ impl Envelope {
             Phase::Decay => {
                 let d = spec.decay_ms.max(1.0);
                 let t = (self.elapsed_ms / d).clamp(0.0, 1.0);
-                self.value = match spec.curve {
-                    Curve::Linear => 1.0 - t,
-                    Curve::Exponential => (1.0 - t) * (1.0 - t),
-                };
+                let sustain = spec.sustain.clamp(0.0, 1.0);
+                self.value = sustain + (1.0 - sustain) * curve_envelope(t, spec.curve);
+                if t >= 1.0 {
+                    if sustain <= 0.0001 {
+                        self.phase = Phase::Idle;
+                        self.value = 0.0;
+                    } else {
+                        self.phase = Phase::Sustain;
+                        self.value = sustain;
+                        self.elapsed_ms = 0.0;
+                    }
+                }
+            }
+            Phase::Sustain => {
+                self.value = spec.sustain.clamp(0.0, 1.0);
+                if self.value <= 0.0001 {
+                    self.phase = Phase::Idle;
+                    self.value = 0.0;
+                }
+            }
+            Phase::Release => {
+                let r = spec.release_ms.max(1.0);
+                let t = (self.elapsed_ms / r).clamp(0.0, 1.0);
+                self.value = self.release_from * curve_envelope(t, spec.curve);
                 if t >= 1.0 {
                     self.phase = Phase::Idle;
                     self.value = 0.0;
@@ -140,13 +183,39 @@ impl Envelope {
 /// Honnan jön a moduláció.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ModSource {
-    Note { note: u8 },
-    Cc { cc: u8 },
+    Note {
+        note: u8,
+    },
+    Cc {
+        cc: u8,
+    },
     AudioBand(usize),
     AudioRms,
     AudioOnset,
+    /// Egy adott bemeneti audio-csatorna (0-indexelt) RMS szintje.
+    AudioChannelRms(usize),
+    /// Egy adott bemeneti audio-csatorna (0-indexelt) onset/tranziens eseménye.
+    AudioChannelOnset(usize),
+    /// Egy adott bemeneti audio-csatorna (0-indexelt) mély (low) energiája.
+    AudioChannelLow(usize),
+    /// Egy adott bemeneti audio-csatorna (0-indexelt) közép (mid) energiája.
+    AudioChannelMid(usize),
+    /// Egy adott bemeneti audio-csatorna (0-indexelt) magas (high) energiája.
+    AudioChannelHigh(usize),
+    /// Sztereó pár (két 0-indexelt bemeneti csatorna, pl. Loopback 11-12) RMS szintje.
+    AudioPairRms(usize, usize),
+    /// Sztereó pár onset/tranziens eseménye.
+    AudioPairOnset(usize, usize),
+    /// Sztereó pár mély (low) energiája.
+    AudioPairLow(usize, usize),
+    /// Sztereó pár közép (mid) energiája.
+    AudioPairMid(usize, usize),
+    /// Sztereó pár magas (high) energiája.
+    AudioPairHigh(usize, usize),
     /// Tempó-szinkron LFO, periódus ütemekben.
-    Lfo { period_beats: f64 },
+    Lfo {
+        period_beats: f64,
+    },
     /// A jelenlegi negyed tört része (0..1).
     ClockPhase,
 }
@@ -158,9 +227,26 @@ pub enum ModTarget {
     DeckOpacity(usize),
     /// Egyszeri trigger: a deck a következő klipre lép (kvantáltan).
     DeckNextClip(usize),
+    /// Hozzáadódik a deck lejátszási sebességéhez.
+    DeckSpeed(usize),
+    /// Egyszeri trigger: adott deck adott klipjének indítása.
+    DeckLaunchClip(usize, usize),
     ShaderParam(usize),
     AudioOpacity,
+    VideoOpacity,
+    ShaderOpacity,
     MasterOpacity,
+    /// Egyszeri trigger (vagy >0.5): blackout ki/be.
+    MasterBlackout,
+    /// Hozzáadódik a BPM-hez (amount * 100 BPM tartományban vagy közvetlenül).
+    ClockBpm,
+    /// Beépített Master Post-FX célok:
+    FxFlash,
+    FxInvert,
+    FxHue,
+    FxSaturation,
+    FxContrast,
+    FxRgbSplit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,7 +273,10 @@ pub struct ModRoute {
 impl ModRoute {
     pub fn new(source: ModSource, target: ModTarget) -> Self {
         let mode = match source {
-            ModSource::Note { .. } | ModSource::AudioOnset => ModMode::Trigger,
+            ModSource::Note { .. }
+            | ModSource::AudioOnset
+            | ModSource::AudioChannelOnset(_)
+            | ModSource::AudioPairOnset(_, _) => ModMode::Trigger,
             _ => ModMode::Continuous,
         };
         Self {
@@ -218,12 +307,24 @@ impl ModRoute {
     }
 }
 
+/// Egy bemeneti audio-csatorna pillanatnyi modulációs értékei.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChannelModInput {
+    pub rms: f32,
+    pub low: f32,
+    pub mid: f32,
+    pub high: f32,
+    pub onset: bool,
+}
+
 /// A források pillanatnyi értékei.
 #[derive(Debug, Clone)]
 pub struct ModInputs {
     pub bands: [f32; AUDIO_BANDS],
     pub rms: f32,
     pub onset: bool,
+    /// Csatornánkénti audio-értékek (pl. Scarlett 18i8 1..18 sávok).
+    pub channels: Vec<ChannelModInput>,
     /// (note, velocity) ebben a frame-ben.
     pub notes: Vec<(u8, u8)>,
     pub note_offs: Vec<u8>,
@@ -240,6 +341,7 @@ impl Default for ModInputs {
             bands: [0.0; AUDIO_BANDS],
             rms: 0.0,
             onset: false,
+            channels: Vec::new(),
             notes: Vec::new(),
             note_offs: Vec::new(),
             ccs: Vec::new(),
@@ -258,13 +360,13 @@ pub struct ModOutputs {
 }
 
 impl ModOutputs {
-    /// Egy cél folytonos értéke (0, ha nincs).
+    /// Egy cél összesített folytonos értéke (0, ha nincs).
     pub fn value(&self, target: ModTarget) -> f32 {
         self.continuous
             .iter()
             .filter(|(t, _)| *t == target)
             .map(|(_, v)| *v)
-            .fold(0.0f32, f32::max)
+            .sum()
     }
 
     pub fn has_trigger(&self, target: ModTarget) -> bool {
@@ -292,7 +394,19 @@ impl ModMatrix {
         self.routes.iter().any(|r| {
             matches!(
                 r.source,
-                ModSource::AudioBand(_) | ModSource::AudioRms | ModSource::AudioOnset
+                ModSource::AudioBand(_)
+                    | ModSource::AudioRms
+                    | ModSource::AudioOnset
+                    | ModSource::AudioChannelRms(_)
+                    | ModSource::AudioChannelOnset(_)
+                    | ModSource::AudioChannelLow(_)
+                    | ModSource::AudioChannelMid(_)
+                    | ModSource::AudioChannelHigh(_)
+                    | ModSource::AudioPairRms(_, _)
+                    | ModSource::AudioPairOnset(_, _)
+                    | ModSource::AudioPairLow(_, _)
+                    | ModSource::AudioPairMid(_, _)
+                    | ModSource::AudioPairHigh(_, _)
             )
         })
     }
@@ -302,7 +416,6 @@ impl ModMatrix {
         let mut out = ModOutputs::default();
         for route in self.routes.iter_mut() {
             let before = route.env.triggers;
-            let mut fired = false;
 
             match route.source {
                 ModSource::Note { note } => {
@@ -343,6 +456,61 @@ impl ModMatrix {
                         route.value = route.env.advance(inputs.dt_ms, &route.spec);
                     }
                 }
+                ModSource::AudioChannelRms(ch) => {
+                    let rms = inputs.channels.get(ch).map(|c| c.rms).unwrap_or(0.0);
+                    route.value += (rms - route.value) * 0.45;
+                }
+                ModSource::AudioChannelOnset(ch) => {
+                    let onset = inputs.channels.get(ch).map(|c| c.onset).unwrap_or(false);
+                    if onset {
+                        route.env.trigger(&route.spec);
+                        route.hits += 1;
+                        route.value = route.env.value;
+                    } else {
+                        route.value = route.env.advance(inputs.dt_ms, &route.spec);
+                    }
+                }
+                ModSource::AudioChannelLow(ch) => {
+                    route.value = inputs.channels.get(ch).map(|c| c.low).unwrap_or(0.0);
+                }
+                ModSource::AudioChannelMid(ch) => {
+                    route.value = inputs.channels.get(ch).map(|c| c.mid).unwrap_or(0.0);
+                }
+                ModSource::AudioChannelHigh(ch) => {
+                    route.value = inputs.channels.get(ch).map(|c| c.high).unwrap_or(0.0);
+                }
+                ModSource::AudioPairRms(a, b) => {
+                    let ra = inputs.channels.get(a).map(|c| c.rms).unwrap_or(0.0);
+                    let rb = inputs.channels.get(b).map(|c| c.rms).unwrap_or(0.0);
+                    let rms = ((ra + rb) * 0.5).max(ra.max(rb) * 0.85);
+                    route.value += (rms - route.value) * 0.45;
+                }
+                ModSource::AudioPairOnset(a, b) => {
+                    let oa = inputs.channels.get(a).map(|c| c.onset).unwrap_or(false);
+                    let ob = inputs.channels.get(b).map(|c| c.onset).unwrap_or(false);
+                    if oa || ob {
+                        route.env.trigger(&route.spec);
+                        route.hits += 1;
+                        route.value = route.env.value;
+                    } else {
+                        route.value = route.env.advance(inputs.dt_ms, &route.spec);
+                    }
+                }
+                ModSource::AudioPairLow(a, b) => {
+                    let la = inputs.channels.get(a).map(|c| c.low).unwrap_or(0.0);
+                    let lb = inputs.channels.get(b).map(|c| c.low).unwrap_or(0.0);
+                    route.value = ((la + lb) * 0.5).max(la.max(lb) * 0.85);
+                }
+                ModSource::AudioPairMid(a, b) => {
+                    let ma = inputs.channels.get(a).map(|c| c.mid).unwrap_or(0.0);
+                    let mb = inputs.channels.get(b).map(|c| c.mid).unwrap_or(0.0);
+                    route.value = ((ma + mb) * 0.5).max(ma.max(mb) * 0.85);
+                }
+                ModSource::AudioPairHigh(a, b) => {
+                    let ha = inputs.channels.get(a).map(|c| c.high).unwrap_or(0.0);
+                    let hb = inputs.channels.get(b).map(|c| c.high).unwrap_or(0.0);
+                    route.value = ((ha + hb) * 0.5).max(ha.max(hb) * 0.85);
+                }
                 ModSource::Lfo { period_beats } => {
                     let phase = if period_beats > 0.0 {
                         (inputs.beat / period_beats).fract()
@@ -357,7 +525,7 @@ impl ModMatrix {
                 }
             }
 
-            fired = route.env.triggers > before;
+            let fired = route.env.triggers > before;
 
             if fired && route.mode == ModMode::Trigger {
                 out.triggers.push(route.target);
@@ -388,6 +556,30 @@ mod tests {
     }
 
     #[test]
+    fn adsr_holds_sustain_and_releases() {
+        let spec = EnvelopeSpec {
+            attack_ms: 0.0,
+            hold_ms: 0.0,
+            decay_ms: 100.0,
+            sustain: 0.5,
+            release_ms: 200.0,
+            curve: Curve::Linear,
+            retrigger: true,
+        };
+        let mut env = Envelope::default();
+        env.trigger(&spec);
+        env.advance(150.0, &spec);
+        assert!((env.value - 0.5).abs() < 0.01, "sustain = {}", env.value);
+        assert!(env.is_active());
+        env.release();
+        env.advance(100.0, &spec);
+        assert!((env.value - 0.25).abs() < 0.01, "release = {}", env.value);
+        env.advance(150.0, &spec);
+        assert_eq!(env.value, 0.0);
+        assert!(!env.is_active());
+    }
+
+    #[test]
     fn kick_bumps_opacity_then_decays() {
         let mut m = ModMatrix::new();
         m.add(
@@ -396,6 +588,8 @@ mod tests {
                     attack_ms: 0.0,
                     hold_ms: 0.0,
                     decay_ms: 200.0,
+                    sustain: 0.0,
+                    release_ms: 150.0,
                     curve: Curve::Linear,
                     retrigger: true,
                 },
@@ -480,9 +674,7 @@ mod tests {
     fn lfo_is_tempo_synced() {
         let mut m = ModMatrix::new();
         m.add(ModRoute::new(
-            ModSource::Lfo {
-                period_beats: 4.0,
-            },
+            ModSource::Lfo { period_beats: 4.0 },
             ModTarget::MasterOpacity,
         ));
         let mut vals = Vec::new();
@@ -502,10 +694,7 @@ mod tests {
     #[test]
     fn amount_scales_contribution() {
         let mut m = ModMatrix::new();
-        m.add(
-            ModRoute::new(ModSource::AudioRms, ModTarget::MasterOpacity)
-                .with_amount(0.25),
-        );
+        m.add(ModRoute::new(ModSource::AudioRms, ModTarget::MasterOpacity).with_amount(0.25));
         let mut inp = inputs();
         inp.rms = 1.0;
         let out = m.tick(&inp);

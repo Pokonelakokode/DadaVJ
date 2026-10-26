@@ -28,6 +28,19 @@ pub struct Project {
     pub decks: Vec<DeckConfig>,
     #[serde(default)]
     pub mods: Vec<ModConfig>,
+    /// A deck-rétegek Z-sorrendje alulról felfelé (deck indexek).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_order: Option<Vec<usize>>,
+    /// Az ISF effekt cél rétege: None = legfelső kompozit, Some(N) = a deck N
+    /// rétegét cseréli le az effekt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shader_target: Option<usize>,
+    /// "coverage" (opacity fedés) vagy "shader" (shader saját alpha / kulcsozás).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shader_alpha: Option<String>,
+    /// Az ISF effekt blend módja.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shader_blend: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -55,6 +68,9 @@ pub struct AudioConfig {
 pub struct DeckConfig {
     /// Mappa, amiből a clip-bank jön (vagy egyetlen fájl).
     pub folder: String,
+    /// Egyedi klip-beállítások (sebesség, loop, BPM snap, in-point).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<ClipConfig>,
     /// Melyik klip kezdődjön (index).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_clip: Option<usize>,
@@ -70,6 +86,53 @@ pub struct DeckConfig {
     pub opacity: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_beats: Option<f64>,
+    /// Deck-szintű BPM sync ütemszám (0 = kikapcsolva).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bpm_sync: Option<f64>,
+    /// A kézi következő-klip gomb módja: "sequential" / "shuffle".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_next: Option<String>,
+    /// Deck-szintű chroma key (színkivétel) bekapcsolva.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_key: Option<bool>,
+    /// A kivett kulcsszín sRGB-ben (0..1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_color: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_tolerance: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_softness: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_spill: Option<f32>,
+}
+
+/// Egy klip mentett beállításai.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ClipConfig {
+    /// A klip neve (a fájlnév), ami alapján vissza lehet párosítani.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_point: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snap_beats: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f32>,
+    /// Klipp-szintű chroma override módja: "inherit" / "custom" / "off".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_mode: Option<String>,
+    /// A klip saját kulcsszíne sRGB-ben (custom mód).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_color: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_tolerance: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_softness: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_spill: Option<f32>,
 }
 
 impl Project {
@@ -156,6 +219,7 @@ impl Project {
         (
             DeckConfig {
                 folder,
+                clips: Vec::new(),
                 start_clip: None,
                 autopilot: Some(if beats > 0.0 {
                     "sequential".to_string()
@@ -167,6 +231,13 @@ impl Project {
                 blend,
                 opacity: None,
                 fade_beats: None,
+                bpm_sync: None,
+                manual_next: None,
+                chroma_key: None,
+                chroma_color: None,
+                chroma_tolerance: None,
+                chroma_softness: None,
+                chroma_spill: None,
             },
             manual_blend,
         )
@@ -209,10 +280,30 @@ mod tests {
             decks: vec![
                 DeckConfig {
                     folder: "media/base".into(),
+                    clips: vec![ClipConfig {
+                        name: "loop.mp4".into(),
+                        speed: Some(1.5),
+                        in_point: Some(0.25),
+                        loop_mode: Some("pingpong".into()),
+                        snap_beats: Some(4.0),
+                        weight: Some(2.0),
+                        chroma_mode: Some("custom".into()),
+                        chroma_color: Some([0.3, 0.8, 0.1]),
+                        chroma_tolerance: Some(0.35),
+                        chroma_softness: Some(0.15),
+                        chroma_spill: Some(0.45),
+                    }],
                     autopilot: Some("sequential".into()),
                     every_beats: Some(16.0),
                     blend: Some("normal".into()),
                     opacity: Some(1.0),
+                    bpm_sync: Some(8.0),
+                    manual_next: Some("shuffle".into()),
+                    chroma_key: Some(true),
+                    chroma_color: Some([0.2, 0.9, 0.3]),
+                    chroma_tolerance: Some(0.4),
+                    chroma_softness: Some(0.2),
+                    chroma_spill: Some(0.5),
                     ..Default::default()
                 },
                 DeckConfig {
@@ -232,12 +323,40 @@ mod tests {
                     route: "audio.bass->shader.param.0".into(),
                 },
             ],
+            layer_order: Some(vec![1, 0]),
+            shader_target: Some(1),
+            shader_alpha: Some("shader".into()),
+            shader_blend: Some("normal".into()),
         };
         let text = p.to_toml().unwrap();
         let back = Project::from_toml(&text).unwrap();
         assert_eq!(p, back);
         assert!(text.contains("[[decks]]"));
         assert!(text.contains("note:36->deck.opacity.1"));
+        assert!(text.contains("layer_order = [\n    1,\n    0,\n]"));
+        assert!(text.contains("shader_target = 1"));
+        assert!(text.contains("shader_alpha = \"shader\""));
+        assert!(text.contains("chroma_key = true"));
+        assert!(text.contains("chroma_color = ["));
+        assert!(text.contains("chroma_tolerance = 0.4"));
+        assert!(text.contains("chroma_mode = \"custom\""));
+        assert!(text.contains("chroma_spill = 0.45"));
+    }
+
+    #[test]
+    fn layer_order_and_shader_target_are_optional() {
+        let text = r#"
+version = 1
+shader = "shaders/mirror.isf"
+
+[[decks]]
+folder = "media/base"
+"#;
+        let p = Project::from_toml(text).unwrap();
+        assert_eq!(p.layer_order, None);
+        assert_eq!(p.shader_target, None);
+        assert_eq!(p.shader_alpha, None);
+        assert_eq!(p.shader_blend, None);
     }
 
     #[test]
